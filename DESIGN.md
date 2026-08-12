@@ -1,6 +1,6 @@
 # beb
 
-beb delivers signed messages between identities on one machine.
+beb delivers signed messages between identities.
 
 An identity is an SSH key. A message is signed bytes. A mailbox is a
 directory. Mail waits until read.
@@ -152,6 +152,8 @@ this leans on are kernel guarantees network filesystems do not keep.
     beb read                    consume the next message
     beb read ID                 inspect one message
     beb wait [-t SECS]          block until the next message arrives
+    beb pack RECIPIENT [BODY]   a signed portable delivery on stdout
+    beb receive                 install one delivery from stdin
     beb whoami                  your address
 
 `init` creates `./.beb`: an ed25519 keypair and a `.gitignore`
@@ -215,11 +217,76 @@ read.
 Every ack names the next step; every refusal names the fix. The CLI
 is the documentation.
 
+## Portable delivery
+
+A message can leave the machine as an mbeb: the exact signed
+envelope bytes and their detached signature, safely framed. `.mbeb`
+is the conventional filename when one is persisted; the extension
+has no semantic effect, is never part of the signed data, and
+`receive` reads stdin as the sole authority. beb still never touches
+a network: `pack` makes bytes, `receive` accepts bytes, and how they
+travel — ssh, http, a pipe, a copied file — is the operator's
+choice, owed nothing by beb.
+
+    beb pack bob "the schema is ready" > note.mbeb
+    beb pack bob < report.md | ssh host beb receive
+
+The frame is lengths-then-bytes:
+
+    beb <envelope byte count> <signature byte count>\n
+    <envelope bytes><signature bytes>
+
+then end of input. Nothing is delimited, so no body can collide with
+a delimiter; there is no version field, because a different frame is
+a different protocol; one frame is one delivery, and trailing bytes
+are a refusal. The frame carries the two byte sequences and nothing
+else: no host, no route, no time, no delivery id. Networking never
+enters the signed bytes.
+
+`pack` signs and does not deliver: normal identity resolution,
+normal recipient resolution, the normal envelope, and no mailbox,
+counter, or cursor is touched anywhere. Its stdout is the product
+and its success is silent. Bodies stream through disk both ways;
+nothing holds a body in memory.
+
+`receive` installs into the resolved identity's own mailbox and no
+other: a delivery whose `to:` is not the resolved identity is
+refused — beb is not a router, even between two identities on one
+machine. It verifies before anything becomes visible: frame,
+envelope grammar, ed25519 only, recipient binding, signature, and
+only then installs through the same lock, counter, write ordering,
+and durability as local delivery. Failure at any step is fail-closed
+and leaves nothing visible; as with any delivery, a failure after id
+allocation may leave a gap, and gaps are legal.
+
+An installed mbeb is an ordinary local message. `list`, `read`, and
+`wait` cannot tell it crossed a machine; its delivery id is assigned
+here, so the same message carries different ids on different
+machines; the cursor does not move; nothing is woken by beb itself —
+a watching runtime notices the arrival the way it notices any other.
+
+The transport is untrusted: it may copy, delay, reorder, replay, or
+inspect deliveries, and authentication comes solely from the signed
+bytes. `receive` is idempotent over retained history: a delivery
+whose exact envelope bytes are already present is accepted without a
+second copy, and the ack names the existing id (`accepted <id>;
+already delivered`) — so a store-and-forward carrier may retry
+freely (the duplicate check and the insertion happen under the same
+mailbox lock, so concurrent retries converge to one message), and
+at-least-once transport becomes exactly-once mail for
+as long as the original is retained. The mailbox remembers exactly
+what it retains: a pruned message is a forgotten one, and a replay
+after pruning installs anew. Identity is the envelope bytes alone —
+the nonce makes deliberate repeats distinct messages, and the
+signature stays outside, because any valid signature over the same
+bytes is the same message.
+
 ## Out of scope
 
-Transport, relays, admission, deduplication, broadcast, presence,
-threads, wake policy. Whatever comes later, the envelope and the
-reader guarantees do not change.
+Moving bytes between machines (`pack` emits and `receive` accepts;
+every carrier is the operator's choice), relays, admission,
+deduplication, broadcast, presence, threads, wake policy. Whatever
+comes later, the envelope and the reader guarantees do not change.
 
 ## Design test
 

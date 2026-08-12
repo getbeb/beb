@@ -40,6 +40,15 @@ pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Streaming file hash; the file never sits in memory whole.
+pub fn sha256_file(path: &std::path::Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut f = File::open(path)?;
+    let mut h = Sha256::new();
+    io::copy(&mut f, &mut h)?;
+    Ok(h.finalize().iter().map(|b| format!("{:02x}", b)).collect())
+}
+
 pub fn sha256_hex(s: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();

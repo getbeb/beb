@@ -1,6 +1,6 @@
 # beb
 
-Signed messages between identities on one machine.
+Signed messages between identities.
 
 An identity is an SSH key that lives in a directory. Every message is
 signed with `ssh-keygen -Y` and stored as the exact signed bytes, one
@@ -93,6 +93,8 @@ beb list [--all]            unread by default
 beb read                    consume the next message
 beb read ID                 inspect one message
 beb wait [-t SECS]          block until the next message arrives
+beb pack RECIPIENT [BODY]   a signed portable delivery on stdout
+beb receive                 install one delivery from stdin
 beb whoami                  your address
 ```
 
@@ -150,6 +152,31 @@ reaches its body, and `ssh-keygen -Y verify` takes it as-is. `read`
 verifies the signature and the recipient binding before printing a
 byte; a message that fails either check is refused with the exact
 `rm` that removes it, and the numbering tolerates the gap.
+
+## Across machines
+
+A message travels as an mbeb: the exact signed envelope and its
+detached signature, safely framed, self-contained.
+
+```sh
+beb pack bob "the schema is ready" > note.mbeb   # sign, don't deliver
+beb pack bob < report.md | ssh host beb receive  # any pipe is a transport
+```
+
+`pack` writes the delivery to stdout and touches no mailbox;
+`.mbeb` is the conventional name when one is saved as a file.
+`receive` verifies everything — envelope, recipient, signature —
+before installing it into the resolved identity's own mailbox as an
+ordinary local message: same ids, same guarantees, and a parked
+`beb wait` notices it like any other arrival. A delivery addressed
+to someone else is refused; beb is not a router. Receive is
+idempotent over retained history: the same delivery presented again
+acks the existing id without installing a second copy, so a
+store-and-forward carrier may retry freely.
+
+beb still never touches a network: `pack` makes bytes, `receive`
+accepts bytes, and how they travel — ssh, http, a copied file — is
+your choice.
 
 The full design, including the envelope format, the delivery
 guarantees, and what beb refuses to know, is in

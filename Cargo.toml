@@ -1,9 +1,9 @@
 [package]
 name = "beb"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Signed messages between identities on one machine"
+description = "Signed messages between identities"
 license = "MIT"
 
 [dependencies]

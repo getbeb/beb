@@ -75,13 +75,52 @@ impl Mailbox {
     /// can never do is make a message visible without its signature.
     pub fn deliver(&self, envelope: &Path, signature: &Path) -> Result<u64, String> {
         self.ensure()?;
+        let _lock = self.lock()?;
+        self.install(envelope, signature)
+    }
+
+    /// Accept unless the exact envelope bytes are already retained. The
+    /// duplicate check and the insertion happen under the same exclusive
+    /// lock, so concurrent retries of one delivery converge to one
+    /// message: the decision is atomic with the act.
+    pub fn deliver_once(&self, envelope: &Path, signature: &Path) -> Result<Delivered, String> {
+        self.ensure()?;
+        let _lock = self.lock()?;
+
+        let incoming_len = fs::metadata(envelope)
+            .map_err(|e| format!("cannot stat envelope: {e}"))?
+            .len();
+        let mut incoming_hash: Option<String> = None;
+        for id in self.ids() {
+            let p = self.message(id);
+            if fs::metadata(&p).map(|m| m.len()).unwrap_or(0) != incoming_len {
+                continue;
+            }
+            if incoming_hash.is_none() {
+                incoming_hash = Some(
+                    crate::util::sha256_file(envelope)
+                        .map_err(|e| format!("cannot hash envelope: {e}"))?,
+                );
+            }
+            if crate::util::sha256_file(&p).ok().as_deref() == incoming_hash.as_deref() {
+                return Ok(Delivered::Already(id));
+            }
+        }
+        self.install(envelope, signature).map(Delivered::Fresh)
+    }
+
+    fn lock(&self) -> Result<File, String> {
         let lock = OpenOptions::new()
             .create(true)
             .write(true)
             .open(self.dir.join(".lock"))
             .map_err(|e| format!("cannot open mailbox lock: {e}"))?;
         flock_exclusive(&lock)?;
+        Ok(lock)
+    }
 
+    /// Counter, then signature, then message; the caller holds the lock.
+    fn install(&self, envelope: &Path, signature: &Path) -> Result<u64, String> {
         let counter_path = self.dir.join(".counter");
         let counter: u64 = fs::read_to_string(&counter_path)
             .ok()
@@ -95,6 +134,11 @@ impl Mailbox {
         place(envelope, &self.message(id), &self.messages())?;
         Ok(id)
     }
+}
+
+pub enum Delivered {
+    Fresh(u64),
+    Already(u64),
 }
 
 /// Durable move into the spool: fsync the file, rename it in (same

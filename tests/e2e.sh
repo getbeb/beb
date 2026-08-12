@@ -338,6 +338,93 @@ ls "$MB_P/messages" | sort | tail -1 | grep -qx '000000000000000040' || die "par
 diff <(ls "$MB_P/messages" | sort) <(ls "$MB_P/signatures" | sort) >/dev/null || die "parallel: signature set differs from message set"
 ok "40 parallel senders: 40 messages, ids 1..40, no reuse, every signature present"
 
+# ---- portable delivery: pack | receive ---------------------------------
+
+mkid m1 >/dev/null || die "init m1"
+mkid m2 >/dev/null || die "init m2"
+M2=$(addr m2)
+mkid m3 >/dev/null || die "init m3"
+echo "carrier $M2" >>"$KS"
+
+(cd "$W/m1" && "$BEB" pack carrier "over the wall") >"$HOME/note.mbeb" 2>"$ERR" || die "pack failed"
+test -s "$HOME/note.mbeb" || die "pack wrote nothing"
+test -s "$ERR" && die "pack spoke on success: $(cat "$ERR")"
+head -c 4 "$HOME/note.mbeb" | grep -q "^beb " || die "frame header shape"
+ok "pack: silent success, frame on stdout"
+
+test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 0 || die "pack touched the recipient mailbox"
+ok "pack delivers nothing"
+
+(cd "$W/m2" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "receive failed: $(cat "$ERR")"
+grep -q "^accepted 1; read with: beb read$" "$OUT" || die "receive ack: $(cat "$OUT")"
+(cd "$W/m2" && "$BEB" read) >"$OUT" 2>"$ERR" || die "read received mail"
+printf 'over the wall' | diff - "$OUT" >/dev/null || die "body across the wall: $(cat "$OUT")"
+ok "receive installs an ordinary local message, body exact"
+
+(cd "$W/m3" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" && die "misaddressed delivery accepted"
+grep -q "not a router" "$ERR" || die "router refusal text: $(cat "$ERR")"
+test "$(ls "$(mbox m3)/messages" | wc -l | tr -d ' ')" = 0 || die "refused delivery left a message"
+ok "wrong recipient: refused, beb is not a router"
+
+(cd "$W/m2" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "replay errored"
+grep -q "^accepted 1; already delivered$" "$OUT" || die "replay ack: $(cat "$OUT")"
+test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 1 || die "replay installed a second copy"
+ok "replay: idempotent, acks the existing id, no second copy"
+
+cp "$HOME/note.mbeb" "$HOME/tampered.mbeb"
+python3 -c "
+import pathlib
+p = pathlib.Path('$HOME/tampered.mbeb')
+b = bytearray(p.read_bytes())
+b[-10] ^= 0xFF
+p.write_bytes(bytes(b))
+"
+(cd "$W/m2" && "$BEB" receive <"$HOME/tampered.mbeb") >"$OUT" 2>"$ERR" && die "tampered delivery accepted"
+grep -q "verification failed" "$ERR" || die "tamper refusal text: $(cat "$ERR")"
+ok "tampered delivery: refused, nothing visible"
+
+head -c 100 "$HOME/note.mbeb" | (cd "$W/m2" && "$BEB" receive) >"$OUT" 2>"$ERR" && die "truncated accepted"
+grep -q "truncated" "$ERR" || die "truncation refusal text: $(cat "$ERR")"
+ok "truncated frame refused"
+
+{ cat "$HOME/note.mbeb"; printf 'extra'; } | (cd "$W/m2" && "$BEB" receive) >"$OUT" 2>"$ERR" && die "trailing bytes accepted"
+grep -q "trailing" "$ERR" || die "trailing refusal text: $(cat "$ERR")"
+test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 1 || die "trailing garbage installed a message"
+ok "trailing bytes refused, nothing installed"
+
+head -c 1048576 /dev/urandom >"$HOME/bin.body"
+(cd "$W/m1" && "$BEB" pack "$M2" <"$HOME/bin.body") | (cd "$W/m2" && "$BEB" receive) >"$OUT" 2>"$ERR" || die "binary pipe failed"
+(cd "$W/m2" && "$BEB" read) >"$HOME/bin.out" 2>"$ERR" || die "read binary"
+cmp -s "$HOME/bin.body" "$HOME/bin.out" || die "binary body mismatch"
+ok "binary body round-trips through a pipe, byte-exact"
+
+# Idempotency spans exactly retained history: prune the original and the
+# same delivery installs anew.
+rm "$(mbox m2)/messages/000000000000000001" "$(mbox m2)/signatures/000000000000000001"
+(cd "$W/m2" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "post-prune replay failed"
+grep -q "^accepted 3; read with: beb read$" "$OUT" || die "post-prune ack: $(cat "$OUT")"
+ok "pruned then replayed: the mailbox remembers what it retains"
+
+# The dedup decision is atomic with insertion: 20 concurrent receives of
+# one fresh delivery converge to exactly one message.
+(cd "$W/m1" && "$BEB" pack "$M2" "race payload") >"$HOME/race.mbeb" 2>/dev/null || die "pack race"
+before=$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')
+for i in $(seq 1 20); do
+    (cd "$W/m2" && "$BEB" receive <"$HOME/race.mbeb") >"$HOME/rc.$i.out" 2>"$HOME/rc.$i.err" &
+done
+wait
+fresh=0
+already=0
+for i in $(seq 1 20); do
+    grep -q "^accepted" "$HOME/rc.$i.out" || die "parallel receive $i failed: $(cat "$HOME/rc.$i.err")"
+    if grep -q "already delivered" "$HOME/rc.$i.out"; then already=$((already + 1)); else fresh=$((fresh + 1)); fi
+done
+test "$fresh" = 1 || die "concurrent receives: $fresh fresh installs, want 1"
+test "$already" = 19 || die "concurrent receives: $already already-acks, want 19"
+after=$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')
+test $((after - before)) = 1 || die "concurrent receives installed $((after - before)) messages"
+ok "20 concurrent receives: one install, dedup atomic with insertion"
+
 # ---- large body streams ------------------------------------------------
 
 BIG=$HOME/big
