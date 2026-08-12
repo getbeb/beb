@@ -1,0 +1,28 @@
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths: [install.sh]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: main
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+      - run: |
+          cp main/install.sh site/install.sh
+          cd site
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add install.sh
+          git diff --cached --quiet || { git commit -m "sync install.sh from main"; git push; }
