@@ -92,8 +92,14 @@ beb send RECIPIENT [BODY]   body from argument or stdin
 beb list [--all]            unread by default
 beb read                    consume the next message
 beb read ID                 inspect one message
+beb wait [-t SECS]          block until the next message arrives
 beb whoami                  your address
 ```
+
+`wait` blocks on a kernel watch, not a poll, and is edge-triggered:
+mail already unread does not return it (that is `list`'s question),
+the next arrival does. It prints nothing and exits 0 on arrival, 1 on
+timeout, so `beb wait && beb read` is a complete event loop.
 
 Every ack names the next step; every refusal names the fix.
 

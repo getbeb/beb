@@ -138,6 +138,7 @@ this leans on are kernel guarantees network filesystems do not keep.
     beb list [--all]            unread by default
     beb read                    consume the next message
     beb read ID                 inspect one message
+    beb wait [-t SECS]          block until the next message arrives
     beb whoami                  your address
 
 `init` creates `./.beb`: an ed25519 keypair and a `.gitignore`
@@ -168,6 +169,18 @@ sender is always addressable.
     beb list
     3  frontend
     4  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+
+`wait` blocks until a message arrives, then exits 0, printing
+nothing. It is edge-triggered on purpose: mail already unread when it
+starts does not return it, because "what stands unread" is `list`'s
+question and `wait` answers only "when does something new land". The
+two compose into any policy a reader wants, and neither implies the
+other. `-t` bounds the wait in seconds; a timeout exits 1, silently,
+an expected outcome rather than a refusal. `wait` is the spool's
+watchability promise extended to processes that cannot hold a kernel
+watch themselves (a shell hook, a script): the reader blocks by its
+own choice, wake policy stays above beb, and receiving still triggers
+nothing.
 
 `read` with no argument consumes: it takes the smallest delivery id
 above the cursor, verifies its signature, prints the raw body and

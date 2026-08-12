@@ -241,6 +241,29 @@ grep -q "rm '" "$ERR" || die "foreign-from refusal names rm"
 ok "validly signed non-ed25519 from: refused"
 rm "$MB_D/messages/000000000000000091" "$MB_D/signatures/000000000000000091"
 
+# ---- wait: edge-triggered block until arrival --------------------------
+
+mkid w1 >/dev/null || die "init w1"
+W1=$(addr w1)
+mkid w2 >/dev/null || die "init w2"
+
+(sleep 1 && cd "$W/w2" && "$BEB" send "$W1" "wake up" >/dev/null 2>&1) &
+t0=$(date +%s)
+(cd "$W/w1" && "$BEB" wait -t 15) >"$OUT" 2>"$ERR" || die "wait did not return on arrival"
+t1=$(date +%s)
+test $((t1 - t0)) -lt 10 || die "wait took $((t1 - t0))s; not event-driven"
+test -s "$OUT" && die "wait printed to stdout"
+ok "wait returns on arrival, prints nothing"
+
+# w1 now has standing unread mail: wait must NOT return for it.
+(cd "$W/w1" && "$BEB" wait -t 2) >"$OUT" 2>"$ERR" && die "wait returned on standing unread"
+test -s "$ERR" && die "timeout was not silent: $(cat "$ERR")"
+ok "standing unread does not return; timeout exits 1 silently"
+
+bx nobody wait && die "wait without identity succeeded"
+grep -q "beb init" "$ERR" || die "wait refusal names the fix"
+ok "wait refuses without an identity"
+
 # ---- 40 parallel senders: the flock is load-bearing --------------------
 
 mkid p >/dev/null || die "init p"
