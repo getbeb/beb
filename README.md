@@ -105,13 +105,17 @@ Every ack names the next step; every refusal names the fix.
 
 ## Identity
 
-Identity resolves to `./.beb` in the working directory, nothing else.
-No environment variable, nothing global, no default: where you run is
-who you are, and a process running where no `.beb` exists refuses to
-be anyone. Scoping identity is the shell's job:
+Identity resolves to `./.beb` in the working directory, or to the
+`.beb` of the directory named by `BEB_IDENTITY` for processes that
+cannot cd (a launchd job, a supervisor's child). There is no
+precedence: when both are present they must agree (by public key,
+not path), and disagreement is a refusal naming both fixes. Nothing
+global, no default: a process that has not been told who it is
+refuses to be anyone.
 
 ```sh
 (cd ~/work/backend && beb send frontend "migration ready")
+BEB_IDENTITY=~/work/backend beb send frontend "migration ready"
 ```
 
 `init` generates the keypair inside `.beb/` along with a `.gitignore`

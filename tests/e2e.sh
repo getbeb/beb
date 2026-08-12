@@ -270,6 +270,59 @@ bx nobody wait && die "wait without identity succeeded"
 grep -q "beb init" "$ERR" || die "wait refusal names the fix"
 ok "wait refuses without an identity"
 
+# ---- BEB_IDENTITY: env identity, no precedence -------------------------
+
+(cd "$W/nobody" && BEB_IDENTITY="$W/a" "$BEB" whoami) >"$OUT" 2>"$ERR" || die "env identity failed"
+test "$(cat "$OUT")" = "$A" || die "env identity wrong key"
+ok "BEB_IDENTITY alone: the env directory's identity"
+
+(cd "$W/a" && BEB_IDENTITY="$W/a" "$BEB" whoami) >"$OUT" 2>"$ERR" || die "env+cwd same dir failed"
+ok "env and cwd agreeing on the same dir works"
+
+mkdir -p "$W/a-twin" && cp -R "$W/a/.beb" "$W/a-twin/.beb"
+(cd "$W/a" && BEB_IDENTITY="$W/a-twin" "$BEB" whoami) >"$OUT" 2>"$ERR" || die "same-key twin refused"
+ok "agreement is by public key, not path"
+
+(cd "$W/b" && BEB_IDENTITY="$W/a" "$BEB" whoami) >"$OUT" 2>"$ERR" && die "conflicting identities resolved"
+grep -q "two identities" "$ERR" || die "conflict refusal text: $(cat "$ERR")"
+grep -q "unset BEB_IDENTITY or cd" "$ERR" || die "conflict refusal names fixes"
+ok "disagreement refuses, names both fixes"
+
+mkdir -p "$W/nobeb"
+(cd "$W/nobody" && BEB_IDENTITY="$W/nobeb" "$BEB" whoami) >"$OUT" 2>"$ERR" && die "broken env resolved"
+grep -q "beb init" "$ERR" || die "broken env refusal names beb init"
+ok "broken BEB_IDENTITY refuses"
+
+(cd "$W/a" && BEB_IDENTITY="$W/nobeb" "$BEB" whoami) >"$OUT" 2>"$ERR" && die "broken env fell back to cwd"
+ok "broken BEB_IDENTITY never falls back, even over a valid cwd"
+
+# A broken claim is not an absent one, on either side.
+mkdir -p "$W/cracked" && cp -R "$W/a/.beb" "$W/cracked/.beb" && printf 'garbage' >"$W/cracked/.beb/id_ed25519.pub"
+
+bx cracked whoami && die "broken cwd identity resolved"
+grep -q "broken identity" "$ERR" || die "broken cwd refusal text: $(cat "$ERR")"
+ok "broken cwd identity refuses as broken, not absent"
+
+(cd "$W/cracked" && BEB_IDENTITY="$W/a" "$BEB" whoami) >"$OUT" 2>"$ERR" && die "broken cwd ignored under env"
+grep -q "agreement cannot be checked" "$ERR" || die "broken-cwd-under-env text: $(cat "$ERR")"
+ok "broken cwd + valid env refuses: no agreement, no precedence"
+
+(cd "$W/a" && BEB_IDENTITY="$W/cracked" "$BEB" whoami) >"$OUT" 2>"$ERR" && die "broken env identity resolved"
+grep -q "broken identity" "$ERR" || die "broken env keeps its reason: $(cat "$ERR")"
+grep -q "has no .beb" "$ERR" && die "broken env mislabeled as absent"
+ok "valid cwd + broken env refuses with the real reason"
+
+# A .beb whose private key is gone is a damaged claim, not an absent one.
+mkdir -p "$W/keyless" && cp -R "$W/a/.beb" "$W/keyless/.beb" && rm "$W/keyless/.beb/id_ed25519"
+
+bx keyless whoami && die "keyless identity resolved"
+grep -q "id_ed25519 is missing" "$ERR" || die "keyless refusal text: $(cat "$ERR")"
+ok "missing private key refuses as broken, not absent"
+
+(cd "$W/keyless" && BEB_IDENTITY="$W/a" "$BEB" whoami) >"$OUT" 2>"$ERR" && die "keyless cwd ignored under env"
+grep -q "agreement cannot be checked" "$ERR" || die "keyless-under-env text: $(cat "$ERR")"
+ok "missing private key + valid env refuses: agreement cannot be established"
+
 # ---- 40 parallel senders: the flock is load-bearing --------------------
 
 mkid p >/dev/null || die "init p"

@@ -58,21 +58,88 @@ struct Identity {
     private_key: PathBuf,
 }
 
-fn identity() -> Result<Identity, String> {
-    let private_key = PathBuf::from(".beb/id_ed25519");
-    if !private_key.is_file() {
-        return Err("not an identity: no .beb here; run beb init".into());
+/// An identity claim at a directory is one of three things, and the
+/// difference is load-bearing: Absent means no claim exists, Broken
+/// means a claim exists that cannot be established. Only Absent may be
+/// passed over; a broken claim always refuses, because failure to
+/// establish agreement must never become precedence.
+enum IdClaim {
+    Absent,
+    Broken(String),
+}
+
+fn identity_at(dir: &Path) -> Result<Identity, IdClaim> {
+    // The claim is the .beb itself; anything wrong past that point is a
+    // claim that exists but cannot be established.
+    let beb = dir.join(".beb");
+    if !beb.exists() {
+        return Err(IdClaim::Absent);
     }
-    let text = fs::read_to_string(".beb/id_ed25519.pub")
-        .map_err(|_| "broken identity: .beb/id_ed25519.pub is missing".to_string())?;
-    let key = key::parse(&text)?;
-    if !key.is_ed25519() {
-        return Err(format!(
-            "identity key is {}; beb speaks ssh-ed25519 only",
-            key.kind
+    if !beb.is_dir() {
+        return Err(IdClaim::Broken("broken identity: .beb is not a directory".into()));
+    }
+    let private_key = beb.join("id_ed25519");
+    if !private_key.is_file() {
+        return Err(IdClaim::Broken(
+            "broken identity: .beb/id_ed25519 is missing".into(),
         ));
     }
+    let text = fs::read_to_string(dir.join(".beb/id_ed25519.pub")).map_err(|_| {
+        IdClaim::Broken("broken identity: .beb/id_ed25519.pub is missing".into())
+    })?;
+    let key = key::parse(&text).map_err(|e| IdClaim::Broken(format!("broken identity: {e}")))?;
+    if !key.is_ed25519() {
+        return Err(IdClaim::Broken(format!(
+            "broken identity: key is {}; beb speaks ssh-ed25519 only",
+            key.kind
+        )));
+    }
     Ok(Identity { key, private_key })
+}
+
+/// Two sources, no precedence: the working directory's `.beb`, or the
+/// directory named by BEB_IDENTITY (the directory you would have cd'd
+/// to). When both are present they must agree, and agreement is judged
+/// by canonical public key, never by path. Disagreement refuses, a
+/// broken claim on either side refuses, and nothing is ever guessed
+/// between two claimants.
+fn identity() -> Result<Identity, String> {
+    let env = std::env::var_os("BEB_IDENTITY")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let cwd = identity_at(Path::new("."));
+    match (env, cwd) {
+        (None, Ok(id)) => Ok(id),
+        (None, Err(IdClaim::Absent)) => {
+            Err("not an identity: no .beb here; run beb init".into())
+        }
+        (None, Err(IdClaim::Broken(e))) => Err(format!("{e}; fix or remove ./.beb")),
+        (Some(dir), cwd) => {
+            let from_env = match identity_at(&dir) {
+                Ok(id) => id,
+                Err(IdClaim::Absent) => {
+                    return Err(format!(
+                        "BEB_IDENTITY={} has no .beb; run beb init there or unset BEB_IDENTITY",
+                        dir.display()
+                    ))
+                }
+                Err(IdClaim::Broken(e)) => {
+                    return Err(format!("BEB_IDENTITY={}: {e}", dir.display()))
+                }
+            };
+            match cwd {
+                Err(IdClaim::Absent) => Ok(from_env),
+                Err(IdClaim::Broken(e)) => Err(format!(
+                    "{e} in ./.beb while BEB_IDENTITY is set; agreement cannot be checked. fix or remove ./.beb"
+                )),
+                Ok(local) if local.key.canonical() == from_env.key.canonical() => Ok(local),
+                Ok(_) => Err(format!(
+                    "two identities claim this process: BEB_IDENTITY={} and ./.beb disagree; unset BEB_IDENTITY or cd",
+                    dir.display()
+                )),
+            }
+        }
+    }
 }
 
 fn cmd_init() -> Result<(), String> {

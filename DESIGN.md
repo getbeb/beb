@@ -55,16 +55,29 @@ An identity lives in a directory:
         ├── id_ed25519
         └── id_ed25519.pub
 
-Every command resolves identity the same way: `./.beb` in the
-working directory, nothing else. No walk upward, no environment
-variable, nothing global, no default. Where you run is who you are;
-a process running where no `.beb` exists refuses to be anyone, and
-the refusal names the fix, `beb init`. Scoping identity is the
-shell's job, not beb's:
+Every command resolves identity the same way: the `.beb` of the
+working directory, or the `.beb` of the directory named by
+`BEB_IDENTITY`. The env var is for processes launched where cd is
+not available (a launchd job, a supervisor's child): its value is
+the directory you would have changed to, set deliberately at launch,
+and children inheriting their parent's self through the environment
+is capability the Unix way.
+
+There is no precedence between the two. When both are present they
+must agree, and agreement is judged by canonical public key, never
+by path: two directories holding the same key are the same identity.
+Disagreement is a refusal naming both fixes. A `BEB_IDENTITY`
+pointing at a directory with no `.beb` is a refusal naming `beb
+init`, never a fallback. No walk upward, nothing global, no default:
+a process that has not been told who it is refuses to be anyone.
+
+Scoping identity in a shell remains the shell's job:
 
     (cd ~/project/backend && beb send frontend "migration ready")
+    BEB_IDENTITY=~/project/backend beb send frontend "migration ready"
 
-Two identities are two directories.
+One public key is one identity, wherever its `.beb` directory is
+made available.
 
 ## Naming
 
