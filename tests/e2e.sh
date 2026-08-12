@@ -32,6 +32,12 @@ addr() { (cd "$W/$1" && "$BEB" whoami); }
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi; }
 mbox() { echo "$SPOOL/$(printf '%s' "$(addr "$1")" | sha)"; }
 
+# ---- version -----------------------------------------------------------
+
+"$BEB" --version >"$OUT" 2>"$ERR" || die "--version failed"
+grep -qE '^beb [0-9]+\.[0-9]+\.[0-9]+$' "$OUT" || die "--version shape: $(cat "$OUT")"
+ok "--version prints beb x.y.z"
+
 # ---- identity ----------------------------------------------------------
 
 mkid a || die "init a"

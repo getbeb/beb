@@ -40,6 +40,10 @@ fn main() {
         Some("read") => cmd_read(&args[1..]),
         Some("wait") => cmd_wait(&args[1..]),
         Some("whoami") => cmd_whoami(),
+        Some("--version") => {
+            println!("beb {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some(v) => Err(format!("unknown verb \"{v}\"\n{USAGE}")),
         None => Err(USAGE.to_string()),
     };
