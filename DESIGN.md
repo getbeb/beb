@@ -103,6 +103,16 @@ key, so a stranger's mail verifies exactly like a named sender's.
 A name listed with two keys is not a send target; the refusal names
 both lines. An unknown name's refusal names the line to add.
 
+An address is a public key, so it needs a channel you can
+authenticate, never a private one. Where ssh already reaches the
+other machine, the exchange is two one-liners:
+
+    echo "pve $(ssh pve 'cd ~/work && beb whoami')" >> ~/.config/beb/known_signers
+    echo "mac $(beb whoami)" | ssh pve 'cat >> ~/.config/beb/known_signers'
+
+Only first contact needs this. A reply never does: `list` prints an
+unknown sender's key in exactly the form `send` accepts.
+
 ## Spool
 
     ~/.local/share/beb/
