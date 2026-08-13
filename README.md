@@ -97,6 +97,13 @@ installs one from stdin, and whatever carries the bytes between them
 is your choice. [beb-ssh](https://github.com/getbeb/beb-ssh) is one
 that keeps custody and retries.
 
+`receive` authenticates the bytes, not the peer. It refuses a
+delivery for a mailbox that does not exist here before storing
+anything, so a stranger cannot spend your disk, but who may hand it a
+frame is the transport's question. Give it a transport that
+authenticates, such as an ssh command, rather than exposing it to
+arbitrary clients.
+
 [DESIGN.md](DESIGN.md) has the envelope format, the delivery
 guarantees, and what beb refuses to know.
 

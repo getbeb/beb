@@ -1,5 +1,6 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 pub fn home() -> Result<PathBuf, String> {
@@ -112,12 +113,68 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn urandom(buf: &mut [u8]) -> Result<(), String> {
+    File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(buf))
+        .map_err(|e| format!("cannot read /dev/urandom: {e}"))
+}
+
 pub fn random_nonce() -> Result<String, String> {
-    let mut f = File::open("/dev/urandom").map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
     let mut buf = [0u8; 16];
-    f.read_exact(&mut buf)
-        .map_err(|e| format!("cannot read /dev/urandom: {e}"))?;
+    urandom(&mut buf)?;
     Ok(b64(&buf))
+}
+
+/// A name no one else can predict. Scratch paths are built from this
+/// rather than the pid: pids repeat, so a predictable name is one an
+/// attacker who can write the directory could occupy in advance.
+pub fn random_hex() -> Result<String, String> {
+    let mut buf = [0u8; 12];
+    urandom(&mut buf)?;
+    Ok(buf.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+/// The spool holds plaintext bodies: beb authenticates, it does not
+/// encrypt. So every directory beb makes is 0700 and every file it makes
+/// is 0600, set at creation rather than inherited from whatever umask the
+/// process happened to start with. Confidentiality that depends on the
+/// environment is confidentiality you cannot state.
+pub const DIR_MODE: u32 = 0o700;
+pub const FILE_MODE: u32 = 0o600;
+
+pub fn private_dir_all(path: &Path) -> io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(DIR_MODE)
+        .create(path)
+}
+
+/// Create a file that must not exist yet, 0600 from the first byte.
+/// Exclusive creation is what makes a random scratch name worth having:
+/// together they refuse a path an attacker planted. Readable as well as
+/// writable, so a caller that fills a file can go on to verify from the
+/// same descriptor instead of reopening its name.
+pub fn private_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(FILE_MODE)
+        .open(path)
+}
+
+/// A fresh scratch directory under the spool's `.tmp`: private, and named
+/// unguessably rather than by pid. Created non-recursively, so an existing
+/// name is an error rather than something to reuse; that plus 0700 on the
+/// spool leaves nothing for a planted path to catch.
+pub fn scratch_dir(tmp_root: &Path, what: &str) -> Result<PathBuf, String> {
+    private_dir_all(tmp_root).map_err(|e| format!("cannot create tempdir: {e}"))?;
+    let dir = tmp_root.join(format!("{what}-{}", random_hex()?));
+    fs::DirBuilder::new()
+        .mode(DIR_MODE)
+        .create(&dir)
+        .map_err(|e| format!("cannot create tempdir: {e}"))?;
+    Ok(dir)
 }
 
 pub fn fsync_dir(dir: &Path) -> io::Result<()> {
@@ -126,13 +183,17 @@ pub fn fsync_dir(dir: &Path) -> io::Result<()> {
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path.parent().expect("write_atomic path has a parent");
-    let tmp = dir.join(format!(".tmp-{}", std::process::id()));
+    let name = random_hex().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let tmp = dir.join(format!(".tmp-{name}"));
     {
-        let mut f = File::create(&tmp)?;
+        let mut f = private_file(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    fs::rename(&tmp, path)?;
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     fsync_dir(dir)
 }
 

@@ -13,7 +13,7 @@
         default = beb;
         beb = pkgs.rustPlatform.buildRustPackage {
           pname = "beb";
-          version = "0.4.0";
+          version = "0.5.1";
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
           # ssh-keygen: the test suite drives it at build time, the binary

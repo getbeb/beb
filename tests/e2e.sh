@@ -7,7 +7,10 @@ BEB=${BEB:?set BEB to the beb binary}
 case "$BEB" in /*) ;; *) BEB=$PWD/$BEB ;; esac
 
 export HOME=$(mktemp -d)
-unset XDG_DATA_HOME XDG_CONFIG_HOME 2>/dev/null || true
+# BEB_IDENTITY too: the suite is run by people who use beb, and an
+# identity inherited from the caller's shell would answer for every
+# command in it.
+unset XDG_DATA_HOME XDG_CONFIG_HOME BEB_IDENTITY 2>/dev/null || true
 SPOOL=$HOME/.local/share/beb
 KS=$HOME/.config/beb/known_signers
 W=$HOME/work
@@ -353,6 +356,31 @@ ls "$MB_P/messages" | sort | tail -1 | grep -qx '000000000000000040' || die "par
 diff <(ls "$MB_P/messages" | sort) <(ls "$MB_P/signatures" | sort) >/dev/null || die "parallel: signature set differs from message set"
 ok "40 parallel senders: 40 messages, ids 1..40, no reuse, every signature present"
 
+# ---- concurrent readers: consumption is serialized too -----------------
+
+# Delivery has always been locked; consumption needs the same lock. A
+# cursor read before another reader's write and set after it moves
+# backwards, and the message in between is handed out twice.
+
+mkid rs >/dev/null || die "init rs"
+mkid rr >/dev/null || die "init rr"
+RR=$(addr rr)
+for i in 1 2 3 4 5 6; do
+    (cd "$W/rs" && "$BEB" send "$RR" "body-$i") >/dev/null 2>"$ERR" || die "send body-$i"
+done
+for i in 1 2 3 4 5 6; do
+    (cd "$W/rr" && "$BEB" read) >"$HOME/rd.$i.out" 2>"$HOME/rd.$i.err" &
+done
+wait
+for i in 1 2 3 4 5 6; do
+    test -s "$HOME/rd.$i.out" || die "concurrent reader $i got nothing: $(cat "$HOME/rd.$i.err")"
+done
+for i in 1 2 3 4 5 6; do cat "$HOME/rd.$i.out"; echo; done | sort >"$HOME/rd.all"
+test "$(sort -u "$HOME/rd.all" | wc -l | tr -d ' ')" = 6 ||
+    die "concurrent readers repeated a message: $(tr '\n' ' ' <"$HOME/rd.all")"
+test "$(cat "$(mbox rr)/cursor")" = 6 || die "cursor after six concurrent reads: $(cat "$(mbox rr)/cursor")"
+ok "6 concurrent readers: six distinct bodies, cursor at 6, never backwards"
+
 # ---- portable delivery: pack | receive ---------------------------------
 
 mkid m1 >/dev/null || die "init m1"
@@ -399,10 +427,53 @@ STRANGER_BOX=$(printf '%s' "$(awk '{print $1" "$2}' "$HOME/stranger.pub")" | sha
 test -d "$SPOOL/$STRANGER_BOX" && die "refused delivery minted a mailbox"
 ok "no mailbox here: refused, nothing minted, the refusal names beb init"
 
+# The frame's lengths are the sender's claim, and a claim is not a licence
+# to spend the recipient's disk. Admission runs on the header prefix, in
+# memory, so a delivery for a stranger writes nothing at all however much
+# it announces it is about to send.
+HDR=$(head -1 "$HOME/stranger.mbeb")
+SL=$(printf '%s' "$HDR" | awk '{print $3}')
+BEFORE=$(du -sk "$SPOOL" | awk '{print $1}')
+{
+    printf 'beb 500000000000 %s\n' "$SL"
+    tail -c "+$((${#HDR} + 2))" "$HOME/stranger.mbeb"
+    head -c 33554432 /dev/zero
+} | (cd "$W/m2" && "$BEB" receive) >"$OUT" 2>"$ERR" && die "unbounded delivery for a stranger accepted"
+grep -q "no mailbox here" "$ERR" || die "unbounded stranger refusal text: $(cat "$ERR")"
+AFTER=$(du -sk "$SPOOL" | awk '{print $1}')
+test "$((AFTER - BEFORE))" -lt 1024 || die "refused delivery wrote $((AFTER - BEFORE))KB to the spool"
+test -z "$(ls -A "$SPOOL/.tmp" 2>/dev/null)" || die "refused delivery left litter: $(ls "$SPOOL/.tmp")"
+ok "a claimed 500GB envelope for a stranger: refused before a byte reaches disk"
+
+# The envelope stays uncapped because a body is. A signature does not: an
+# armored ed25519 signature is under 300 bytes, so the frame refuses an
+# impossible one before reading any of it.
+BEFORE=$(du -sk "$SPOOL" | awk '{print $1}')
+{ printf 'beb 500000000000 500000000000\n'; head -c 1048576 /dev/zero; } |
+    (cd "$W/m2" && "$BEB" receive) >"$OUT" 2>"$ERR" && die "absurd signature length accepted"
+grep -q "no ssh signature exceeds" "$ERR" || die "signature cap refusal text: $(cat "$ERR")"
+AFTER=$(du -sk "$SPOOL" | awk '{print $1}')
+test "$((AFTER - BEFORE))" -lt 1024 || die "refused frame wrote $((AFTER - BEFORE))KB to the spool"
+ok "a signature length no signature can have is refused at the frame"
+
 (cd "$W/m2" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "replay errored"
 grep -q "^accepted 1; already delivered$" "$OUT" || die "replay ack: $(cat "$OUT")"
 test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 2 || die "replay installed a second copy"
 ok "replay: idempotent, acks the existing id, no second copy"
+
+# Dedup decides whether a delivery is already here, so a message it cannot
+# read must never read as one that is not there: that would quietly
+# downgrade exactly-once to maybe-twice. It refuses and names the rm.
+if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$(mbox m2)/messages/000000000000000001"
+    (cd "$W/m2" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" &&
+        die "receive read an unreadable message as absent"
+    grep -q "cannot hash message 1" "$ERR" || die "unreadable refusal text: $(cat "$ERR")"
+    grep -q "to make it a gap" "$ERR" || die "unreadable refusal names the rm: $(cat "$ERR")"
+    chmod 600 "$(mbox m2)/messages/000000000000000001"
+    test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 2 || die "the refusal installed a copy"
+    ok "an unreadable message refuses the delivery instead of reading as absent"
+fi
 
 cp "$HOME/note.mbeb" "$HOME/tampered.mbeb"
 python3 -c "
@@ -457,6 +528,31 @@ test "$already" = 19 || die "concurrent receives: $already already-acks, want 19
 after=$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')
 test $((after - before)) = 1 || die "concurrent receives installed $((after - before)) messages"
 ok "20 concurrent receives: one install, dedup atomic with insertion"
+
+# ---- the spool is private by construction, not by umask ----------------
+
+# beb authenticates and does not encrypt, so the spool holds plaintext
+# bodies. Confidentiality that depends on whatever umask the process
+# started under is confidentiality you cannot state, so beb states the
+# modes itself: every directory it makes is 0700 and every file 0600.
+
+mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+
+mkdir -p "$W/perm"
+(umask 000 && cd "$W/perm" && "$BEB" init) >"$OUT" 2>"$ERR" || die "init under umask 000: $(cat "$ERR")"
+PERM=$(addr perm)
+PB=$(mbox perm)
+(umask 000 && cd "$W/rs" && "$BEB" send "$PERM" "private by construction") >/dev/null 2>"$ERR" ||
+    die "send under umask 000: $(cat "$ERR")"
+test "$(mode "$SPOOL")" = 700 || die "spool root mode $(mode "$SPOOL"), want 700"
+test "$(mode "$PB")" = 700 || die "mailbox mode $(mode "$PB"), want 700"
+test "$(mode "$PB/messages")" = 700 || die "messages mode $(mode "$PB/messages"), want 700"
+test "$(mode "$PB/signatures")" = 700 || die "signatures mode $(mode "$PB/signatures"), want 700"
+test "$(mode "$PB/messages/000000000000000001")" = 600 || die "message mode $(mode "$PB/messages/000000000000000001"), want 600"
+test "$(mode "$PB/signatures/000000000000000001")" = 600 || die "signature mode $(mode "$PB/signatures/000000000000000001"), want 600"
+test "$(mode "$PB/cursor")" = 600 || die "cursor mode $(mode "$PB/cursor"), want 600"
+test "$(mode "$W/perm/.beb")" = 700 || die ".beb mode $(mode "$W/perm/.beb"), want 700"
+ok "under umask 000 the spool is still 0700 dirs and 0600 files"
 
 # ---- large body streams ------------------------------------------------
 

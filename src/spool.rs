@@ -1,8 +1,10 @@
 use std::fs::{self, File, OpenOptions};
+use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::util::{fsync_dir, sha256_hex, write_atomic};
+use crate::util::{fsync_dir, private_dir_all, sha256_hex, write_atomic, FILE_MODE};
 
 pub struct Mailbox {
     pub dir: PathBuf,
@@ -36,8 +38,8 @@ impl Mailbox {
     }
 
     pub fn ensure(&self) -> Result<(), String> {
-        fs::create_dir_all(self.messages())
-            .and_then(|_| fs::create_dir_all(self.signatures()))
+        private_dir_all(&self.messages())
+            .and_then(|_| private_dir_all(&self.signatures()))
             .map_err(|e| format!("cannot create mailbox: {e}"))
     }
 
@@ -93,7 +95,24 @@ impl Mailbox {
         let mut incoming_hash: Option<String> = None;
         for id in self.ids() {
             let p = self.message(id);
-            if fs::metadata(&p).map(|m| m.len()).unwrap_or(0) != incoming_len {
+            // Length is only the fast path to skip hashing. A message that
+            // cannot be measured cannot be ruled out as the duplicate, and
+            // an unreadable message must never read as an absent one: that
+            // would quietly downgrade exactly-once to maybe-twice. Gone is
+            // different from unreadable, because a pruned message is a gap
+            // and gaps are legal.
+            let len = match fs::metadata(&p) {
+                Ok(m) => m.len(),
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(format!(
+                        "cannot stat message {id} ({e}); rm '{}' '{}' to make it a gap",
+                        p.display(),
+                        self.signature(id).display()
+                    ))
+                }
+            };
+            if len != incoming_len {
                 continue;
             }
             if incoming_hash.is_none() {
@@ -102,7 +121,18 @@ impl Mailbox {
                         .map_err(|e| format!("cannot hash envelope: {e}"))?,
                 );
             }
-            if crate::util::sha256_file(&p).ok().as_deref() == incoming_hash.as_deref() {
+            let retained = match crate::util::sha256_file(&p) {
+                Ok(h) => h,
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(format!(
+                        "cannot hash message {id} ({e}); rm '{}' '{}' to make it a gap",
+                        p.display(),
+                        self.signature(id).display()
+                    ))
+                }
+            };
+            if Some(retained.as_str()) == incoming_hash.as_deref() {
                 return Ok(Delivered::Already(id));
             }
         }
@@ -110,11 +140,30 @@ impl Mailbox {
     }
 
     fn lock(&self) -> Result<File, String> {
+        self.lock_file(".lock", "mailbox")
+    }
+
+    /// The consumption lock, held across choosing a message, verifying it,
+    /// printing it, and advancing the cursor. Delivery has always been
+    /// serialized; consumption needs the same rigor, because a cursor read
+    /// before another reader's write and set after it moves the cursor
+    /// backwards and hands the same message out twice.
+    ///
+    /// It is a different file from the delivery lock on purpose: `read`
+    /// holds this one for as long as its stdout takes to drain, and a
+    /// reader piping a large body into something slow must not stall
+    /// senders. Readers wait for readers; delivery never waits for either.
+    pub fn read_lock(&self) -> Result<File, String> {
+        self.lock_file(".reading", "reader")
+    }
+
+    fn lock_file(&self, name: &str, what: &str) -> Result<File, String> {
         let lock = OpenOptions::new()
             .create(true)
             .write(true)
-            .open(self.dir.join(".lock"))
-            .map_err(|e| format!("cannot open mailbox lock: {e}"))?;
+            .mode(FILE_MODE)
+            .open(self.dir.join(name))
+            .map_err(|e| format!("cannot open {what} lock: {e}"))?;
         flock_exclusive(&lock)?;
         Ok(lock)
     }

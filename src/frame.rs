@@ -7,6 +7,14 @@ use std::io::{self, Read, Write};
 
 const HEADER_MAX: usize = 64;
 
+/// The envelope length stays uncapped, because a body is uncapped and it
+/// streams through disk either way. The signature length does not: an
+/// armored ed25519 SSHSIG is under 300 bytes, so this is generous by more
+/// than twenty times. It is not a policy knob but a fact about the format
+/// — a claimed signature this large is not a signature — and the frame
+/// says so before a byte of it is read, let alone written.
+pub const SIGNATURE_MAX: u64 = 8 * 1024;
+
 pub fn write_header(w: &mut impl Write, envelope: u64, signature: u64) -> io::Result<()> {
     writeln!(w, "beb {envelope} {signature}")
 }
@@ -36,7 +44,13 @@ pub fn read_header(r: &mut impl Read) -> Result<(u64, u64), String> {
             "not an mbeb: expected \"beb <envelope bytes> <signature bytes>\"".into(),
         );
     }
-    Ok((parse_len(parts[1])?, parse_len(parts[2])?))
+    let (envelope, signature) = (parse_len(parts[1])?, parse_len(parts[2])?);
+    if signature > SIGNATURE_MAX {
+        return Err(format!(
+            "not an mbeb: signature claims {signature} bytes; no ssh signature exceeds {SIGNATURE_MAX}"
+        ));
+    }
+    Ok((envelope, signature))
 }
 
 fn parse_len(s: &str) -> Result<u64, String> {
@@ -73,6 +87,19 @@ mod tests {
         assert!(parse(b"beb -4 7\n").is_err()); // signed
         assert!(parse(b"beb  42 7\n").is_err()); // double space
         assert!(parse(b"").is_err()); // empty input
+    }
+
+    #[test]
+    fn absurd_signature_length_refused_before_any_bytes() {
+        assert!(parse(format!("beb 1 {}\n", SIGNATURE_MAX).as_bytes()).is_ok());
+        let err = parse(format!("beb 1 {}\n", SIGNATURE_MAX + 1).as_bytes()).unwrap_err();
+        assert!(err.contains("no ssh signature exceeds"));
+        assert!(parse(b"beb 500000000000 500000000000\n").is_err());
+    }
+
+    #[test]
+    fn envelope_length_stays_uncapped() {
+        assert_eq!(parse(b"beb 500000000000 294\n").unwrap(), (500000000000, 294));
     }
 
     #[test]

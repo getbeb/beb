@@ -152,6 +152,25 @@ identity; the stream advances only over messages that passed both
 checks, or holes the owner made on purpose. One mailbox, one
 reader.
 
+One reader is a guarantee, not an assumption. Consumption takes an
+exclusive lock and holds it across choosing the message, verifying
+it, printing it, and advancing the cursor, the same rigor delivery
+has always had. Unlocked, two readers can choose the same id, and a
+cursor read before another reader's write and set after it moves
+backwards, handing a message out twice; agents overlap by nature, so
+the second reader is a hook or a supervisor, not an exotic case. The
+reader's lock is a different file from the delivery lock, because
+`read` holds it for as long as its stdout takes to drain: readers
+wait for readers, and delivery waits for neither.
+
+The spool holds plaintext bodies. beb authenticates and does not
+encrypt, so confidentiality here is the filesystem's, and beb states
+it rather than inheriting it: every directory beb makes is 0700 and
+every file 0600, set at creation, not left to whatever umask the
+process started under. Nothing repairs a spool made wide by
+something else: beb states the modes of what it creates, and a
+directory it did not create is the operator's.
+
 Local filesystem only, never NFS: the flock and rename atomicity
 this leans on are kernel guarantees network filesystems do not keep.
 
@@ -234,6 +253,13 @@ for that message and signature pair. Pruning turns the bad message
 into a gap, gaps are legal, and the stream resumes on the next
 read.
 
+What is printed is what was verified, and that holds on the
+descriptor rather than on the name. Both verbs open the message
+once and read its headers, hand that open file to the verifier, and
+print the body from the same handle. A pathname resolved a second
+time after verification would make the claim depend on the path
+still meaning the same file.
+
 Every ack names the next step; every refusal names the fix. The CLI
 is the documentation.
 
@@ -263,6 +289,13 @@ are a refusal. The frame carries the two byte sequences and nothing
 else: no host, no route, no time, no delivery id. Networking never
 enters the signed bytes.
 
+The envelope count is uncapped, because a body is, and it streams
+through disk either way. The signature count is not: an armored
+ed25519 SSHSIG is under 300 bytes, so a claim of gigabytes is not a
+signature, and the frame says so before reading any of it. That
+bound is arithmetic about the format rather than a policy knob, so
+it needs no setting to tune and no environment variable to forget.
+
 `pack` signs and does not deliver: normal identity resolution,
 normal recipient resolution, the normal envelope, and no mailbox,
 counter, or cursor is touched anywhere. Its stdout is the product
@@ -285,6 +318,25 @@ that keeps a carrier from filling a disk with mailboxes for
 invented keys, and it is why the check is existence rather than
 identity — the spool is the list of who lives here, kept by the
 filesystem, needing no second register.
+
+Admission runs before anything is stored. The address lives inside
+the envelope, so the check cannot come first in the frame, but it
+can come first on disk: `receive` reads the header prefix into
+memory, bounded by the same limit the envelope grammar has always
+had, and refuses a stranger there. A caller who is not writing to a
+resident spends none of the recipient's disk, whatever its lengths
+announced.
+
+Past admission the body streams to disk before its signature is
+checked, and that is inherent rather than an oversight: a signature
+covers the whole envelope, so nothing that refuses to hold a body in
+memory can verify one before storing it. What admission buys is that
+only a resident's address can ask for the space. Beyond that, how
+much a carrier may deliver is the carrier's question — `receive`
+reads one frame from stdin and authenticates the bytes; who is
+allowed to hand it a frame belongs to the transport, which is the
+piece that has a peer to authenticate. Exposed with no transport in
+front of it, `receive` is as open as the pipe feeding it.
 
 `receive` verifies before anything becomes visible: frame, envelope
 grammar, ed25519 only, a mailbox that exists, signature, and only

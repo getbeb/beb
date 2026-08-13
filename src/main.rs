@@ -180,7 +180,8 @@ fn cmd_init() -> Result<(), String> {
     }
     let me = identity()?;
     let canonical = me.key.canonical();
-    let mb = Mailbox::of(&util::spool_root()?, &canonical);
+    let spool = util::spool_root()?;
+    let mb = Mailbox::of(&spool, &canonical);
     mb.ensure()?;
     mb.set_cursor(0)?;
     let short: String = mb
@@ -248,8 +249,7 @@ fn cmd_send(args: &[String]) -> Result<(), String> {
     let (to, display) = resolve_recipient(recipient_arg, &lines, &util::pretty_path(&ks_path), "send")?;
 
     let spool = util::spool_root()?;
-    let tmp = spool.join(".tmp").join(format!("send-{}", std::process::id()));
-    fs::create_dir_all(&tmp).map_err(|e| format!("cannot create tempdir: {e}"))?;
+    let tmp = util::scratch_dir(&spool.join(".tmp"), "send")?;
     let result = write_signed_envelope(&me, &to, args, &tmp)
         .and_then(|(env, sig)| Mailbox::of(&spool, &to.canonical()).deliver(&env, &sig));
     let _ = fs::remove_dir_all(&tmp);
@@ -271,7 +271,7 @@ fn write_signed_envelope(
     let env_path = tmp.join("envelope");
     {
         let mut f =
-            File::create(&env_path).map_err(|e| format!("cannot write envelope: {e}"))?;
+            util::private_file(&env_path).map_err(|e| format!("cannot write envelope: {e}"))?;
         let nonce = util::random_nonce()?;
         f.write_all(envelope::compose(&me.key.canonical(), &to.canonical(), &nonce).as_bytes())
             .map_err(|e| format!("cannot write envelope: {e}"))?;
@@ -301,8 +301,7 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
     let (to, _) = resolve_recipient(recipient_arg, &lines, &util::pretty_path(&ks_path), "pack")?;
 
     let spool = util::spool_root()?;
-    let tmp = spool.join(".tmp").join(format!("pack-{}", std::process::id()));
-    fs::create_dir_all(&tmp).map_err(|e| format!("cannot create tempdir: {e}"))?;
+    let tmp = util::scratch_dir(&spool.join(".tmp"), "pack")?;
     let result = write_signed_envelope(&me, &to, args, &tmp).and_then(|(env, sig)| {
         let el = fs::metadata(&env).map_err(|e| format!("cannot stat envelope: {e}"))?.len();
         let sl = fs::metadata(&sig).map_err(|e| format!("cannot stat signature: {e}"))?.len();
@@ -329,10 +328,7 @@ fn cmd_receive(args: &[String]) -> Result<(), String> {
         return Err("receive takes nothing; the delivery arrives on stdin".into());
     }
     let spool = util::spool_root()?;
-    let tmp = spool
-        .join(".tmp")
-        .join(format!("receive-{}", std::process::id()));
-    fs::create_dir_all(&tmp).map_err(|e| format!("cannot create tempdir: {e}"))?;
+    let tmp = util::scratch_dir(&spool.join(".tmp"), "receive")?;
     let result = receive_one(&spool, &tmp);
     let _ = fs::remove_dir_all(&tmp);
     match result? {
@@ -345,20 +341,19 @@ fn cmd_receive(args: &[String]) -> Result<(), String> {
 fn receive_one(spool: &Path, tmp: &Path) -> Result<spool::Delivered, String> {
     let stdin = io::stdin();
     let mut input = stdin.lock();
+    // The frame refuses an impossible signature length here, before a byte
+    // of it is read.
     let (el, sl) = frame::read_header(&mut input)?;
-    let env_path = tmp.join("envelope");
-    let sig_path = tmp.join("envelope.sig");
-    copy_exact(&mut input, &env_path, el, "envelope")?;
-    copy_exact(&mut input, &sig_path, sl, "signature")?;
-    let mut trail = [0u8; 1];
-    let extra = input
-        .read(&mut trail)
-        .map_err(|e| format!("cannot read frame: {e}"))?;
-    if extra != 0 {
-        return Err("trailing bytes after the frame; one frame is one delivery".into());
-    }
 
-    let h = envelope::read_headers(&env_path)
+    // Admission runs on the header prefix, in memory, bounded by the same
+    // limit the envelope grammar has always had. Nothing reaches disk
+    // until the delivery has named a mailbox that exists here, so an
+    // arbitrary stranger cannot spend the recipient's disk: the mailbox
+    // check is no longer downstream of writing the body.
+    let want = el.min(envelope::HEADER_MAX as u64) as usize;
+    let mut prefix = vec![0u8; want];
+    fill(&mut input, &mut prefix, el, "envelope")?;
+    let h = envelope::parse_headers(&prefix)
         .map_err(|e| format!("delivery is not a beb envelope ({e})"))?;
     if !h.from.is_ed25519() || !h.to.is_ed25519() {
         return Err("envelope has a non-ed25519 key; beb speaks ssh-ed25519 only".into());
@@ -375,7 +370,32 @@ fn receive_one(spool: &Path, tmp: &Path) -> Result<spool::Delivered, String> {
             &util::sha256_hex(&h.to.canonical())[..8]
         ));
     }
-    sshsig::verify(&env_path, &sig_path, &h.from.canonical(), &tmp.join("verify"))
+
+    // Admitted. The body may land now, still uncapped and still streaming
+    // through disk: a signature covers the whole envelope, so no design
+    // that refuses to hold a body in memory can verify one before storing
+    // it. What the admission bought is that only a resident's address can
+    // ask for the space.
+    let env_path = tmp.join("envelope");
+    let sig_path = tmp.join("envelope.sig");
+    let mut env = util::private_file(&env_path)
+        .map_err(|e| format!("cannot write envelope: {e}"))?;
+    env.write_all(&prefix)
+        .map_err(|e| format!("cannot write envelope: {e}"))?;
+    copy_exact(&mut input, &mut env, el - want as u64, want as u64, el, "envelope")?;
+    let mut sig = util::private_file(&sig_path)
+        .map_err(|e| format!("cannot write signature: {e}"))?;
+    copy_exact(&mut input, &mut sig, sl, 0, sl, "signature")?;
+
+    let mut trail = [0u8; 1];
+    let extra = input
+        .read(&mut trail)
+        .map_err(|e| format!("cannot read frame: {e}"))?;
+    if extra != 0 {
+        return Err("trailing bytes after the frame; one frame is one delivery".into());
+    }
+
+    sshsig::verify(&mut env, &sig_path, &h.from.canonical(), &spool.join(".tmp"))
         .map_err(|e| format!("signature verification failed ({e})"))?;
 
     // Idempotent over retained history, atomically: the dedup decision
@@ -384,14 +404,42 @@ fn receive_one(spool: &Path, tmp: &Path) -> Result<spool::Delivered, String> {
     mailbox.deliver_once(&env_path, &sig_path)
 }
 
-/// Stream exactly n bytes to a file; fewer is a truncated frame.
-fn copy_exact(r: &mut impl Read, path: &Path, n: u64, what: &str) -> Result<(), String> {
-    let mut f = File::create(path).map_err(|e| format!("cannot write {what}: {e}"))?;
-    let copied = io::copy(&mut r.by_ref().take(n), &mut f)
+/// Fill the buffer from the stream; short is a truncated frame. `total` is
+/// what the frame claimed for this part, so the refusal counts the part
+/// rather than the read.
+fn fill(r: &mut impl Read, buf: &mut [u8], total: u64, what: &str) -> Result<(), String> {
+    let mut n = 0;
+    while n < buf.len() {
+        let k = r
+            .read(&mut buf[n..])
+            .map_err(|e| format!("cannot read {what}: {e}"))?;
+        if k == 0 {
+            return Err(format!(
+                "truncated frame: {what} ended after {n} of {total} bytes"
+            ));
+        }
+        n += k;
+    }
+    Ok(())
+}
+
+/// Stream exactly `n` more bytes into the file and make them durable;
+/// fewer is a truncated frame. `have` is what already landed and `total`
+/// what the frame claimed, so the refusal counts the whole part.
+fn copy_exact(
+    r: &mut impl Read,
+    f: &mut File,
+    n: u64,
+    have: u64,
+    total: u64,
+    what: &str,
+) -> Result<(), String> {
+    let copied = io::copy(&mut r.by_ref().take(n), f)
         .map_err(|e| format!("cannot read {what}: {e}"))?;
     if copied != n {
         return Err(format!(
-            "truncated frame: {what} ended after {copied} of {n} bytes"
+            "truncated frame: {what} ended after {} of {total} bytes",
+            have + copied
         ));
     }
     f.sync_all().map_err(|e| format!("cannot sync {what}: {e}"))
@@ -435,6 +483,18 @@ fn cmd_read(args: &[String]) -> Result<(), String> {
     }
     let me = identity()?;
     let mb = Mailbox::of(&util::spool_root()?, &me.key.canonical());
+    if !mb.dir.is_dir() {
+        eprintln!("no new mail; cursor at 0");
+        return Ok(());
+    }
+    // Consumption is serialized the way delivery always has been: choosing
+    // the message, verifying it, printing it, and advancing the cursor all
+    // happen under one lock. Without it two readers can choose the same id,
+    // and a cursor read before another reader's write and set after it
+    // moves the cursor backwards, handing a message out twice. The lock is
+    // the reader's alone, so a slow stdout stalls other readers and never
+    // a sender.
+    let _lock = mb.read_lock()?;
     let cursor = mb.cursor();
     match mb.ids().into_iter().find(|&id| id > cursor) {
         None => {
@@ -442,8 +502,8 @@ fn cmd_read(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some(id) => {
-            let h = check(&mb, id, &me)?;
-            print_body(&mb.message(id), h.body_offset)?;
+            let (mut f, h) = check(&mb, id, &me)?;
+            print_body(&mut f, h.body_offset)?;
             mb.set_cursor(id)
         }
     }
@@ -466,8 +526,8 @@ fn cmd_peek(args: &[String]) -> Result<(), String> {
     if !mb.ids().contains(&id) {
         return Err(format!("no message {id}; beb list --all shows what exists"));
     }
-    let h = check(&mb, id, &me)?;
-    print_body(&mb.message(id), h.body_offset)
+    let (mut f, h) = check(&mb, id, &me)?;
+    print_body(&mut f, h.body_offset)
 }
 
 /// Edge-triggered: block until a message arrives after this call starts.
@@ -530,11 +590,19 @@ fn cmd_wait(args: &[String]) -> Result<(), String> {
 /// envelope grammar, ed25519-only, recipient binding, signature. The
 /// refusal always names the rm that turns the message into a gap, and the
 /// caller's cursor is untouched because nothing has moved yet.
-fn check(mb: &Mailbox, id: u64, me: &Identity) -> Result<Headers, String> {
+///
+/// The message is opened once and the open file is what comes back, so the
+/// headers, the bytes ssh-keygen verified, and the bytes printed are all
+/// the one inode. Reopening a pathname after verifying it would leave the
+/// claim "what is printed is what was verified" resting on the path still
+/// meaning the same file.
+fn check(mb: &Mailbox, id: u64, me: &Identity) -> Result<(File, Headers), String> {
     let mp = mb.message(id);
     let sp = mb.signature(id);
     let rm = format!("rm '{}' '{}'", mp.display(), sp.display());
-    let h = envelope::read_headers(&mp)
+    let mut f = File::open(&mp)
+        .map_err(|e| format!("message {id} cannot be opened ({e}); {rm} to make it a gap"))?;
+    let h = envelope::read_headers_from(&mut f)
         .map_err(|e| format!("message {id} is not a beb envelope ({e}); {rm} to make it a gap"))?;
     if !h.from.is_ed25519() || !h.to.is_ed25519() {
         return Err(format!(
@@ -552,23 +620,18 @@ fn check(mb: &Mailbox, id: u64, me: &Identity) -> Result<Headers, String> {
             mp.display()
         ));
     }
-    let scratch = util::spool_root()?
-        .join(".tmp")
-        .join(format!("verify-{}", std::process::id()));
-    let verdict = sshsig::verify(&mp, &sp, &h.from.canonical(), &scratch);
-    let _ = fs::remove_dir_all(&scratch);
-    verdict.map_err(|e| format!("message {id} failed verification ({e}); {rm} to make it a gap"))?;
-    Ok(h)
+    sshsig::verify(&mut f, &sp, &h.from.canonical(), &util::spool_root()?.join(".tmp"))
+        .map_err(|e| format!("message {id} failed verification ({e}); {rm} to make it a gap"))?;
+    Ok((f, h))
 }
 
 /// The body goes file -> stdout with io::copy; it never lands in memory
-/// whole.
-fn print_body(path: &Path, offset: u64) -> Result<(), String> {
-    let mut f = File::open(path).map_err(|e| format!("cannot open message: {e}"))?;
+/// whole. The file is the one check() verified.
+fn print_body(f: &mut File, offset: u64) -> Result<(), String> {
     f.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("cannot seek: {e}"))?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    io::copy(&mut f, &mut out).map_err(|e| format!("cannot print body: {e}"))?;
+    io::copy(f, &mut out).map_err(|e| format!("cannot print body: {e}"))?;
     out.flush().map_err(|e| format!("cannot print body: {e}"))
 }

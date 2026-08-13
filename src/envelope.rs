@@ -6,7 +6,7 @@ use crate::key::{self, PublicKey};
 
 /// Headers must fit in this prefix; ed25519 keys are ~80 bytes, so this is
 /// generous. Nothing past the blank line is ever pulled into memory here.
-const HEADER_MAX: usize = 16 * 1024;
+pub const HEADER_MAX: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub struct Headers {
@@ -25,6 +25,14 @@ pub fn compose(from: &str, to: &str, nonce: &str) -> String {
 
 pub fn read_headers(path: &Path) -> Result<Headers, String> {
     let mut f = File::open(path).map_err(|e| format!("cannot open: {e}"))?;
+    read_headers_from(&mut f)
+}
+
+/// Headers from an open file, reading forward from wherever it stands.
+/// The descriptor stays the caller's, so a caller that verifies and then
+/// prints can do both against the one inode it opened, never a pathname
+/// looked up twice.
+pub fn read_headers_from(f: &mut File) -> Result<Headers, String> {
     let mut buf = vec![0u8; HEADER_MAX];
     let mut n = 0;
     while n < buf.len() {
