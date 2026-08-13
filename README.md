@@ -25,6 +25,26 @@ frontend/.beb                     ops/.beb
                  backend/.beb
 ```
 
+## Usage
+
+```console
+$ beb
+beb 0.5.0 delivers signed messages between identities.
+
+  beb init                    key and mailbox from nothing
+  beb whoami                  your address
+  beb send RECIPIENT [BODY]   sign and deliver, body from argument or stdin
+  beb list [--all]            what is waiting, unread by default
+  beb read                    consume the next message
+  beb peek ID                 inspect one message, consuming nothing
+  beb wait [-t SECS]          block until the next message arrives
+  beb pack RECIPIENT [BODY]   sign one delivery onto stdout
+  beb receive                 install one delivery from stdin
+```
+
+Nine verbs, and no verb has two effects. Everything else is files: an identity is a directory, a mailbox is a directory, a
+message is the bytes that were signed.
+
 ## Install
 
 ```sh
@@ -84,19 +104,7 @@ beb read
 # auth endpoint ready
 ```
 
-## Commands
-
-```
-beb init                    key and mailbox from nothing
-beb send RECIPIENT [BODY]   body from argument or stdin
-beb list [--all]            unread by default
-beb read                    consume the next message
-beb read ID                 inspect one message
-beb wait [-t SECS]          block until the next message arrives
-beb pack RECIPIENT [BODY]   a signed portable delivery on stdout
-beb receive                 install one delivery from stdin
-beb whoami                  your address
-```
+## Waiting
 
 `wait` blocks on a kernel watch, not a poll, and is edge-triggered:
 mail already unread does not return it (that is `list`'s question),
@@ -165,17 +173,22 @@ beb pack bob < report.md | ssh host beb receive  # any pipe is a transport
 
 `pack` writes the delivery to stdout and touches no mailbox;
 `.mbeb` is the conventional name when one is saved as a file.
-`receive` verifies everything — envelope, recipient, signature —
-before installing it into the resolved identity's own mailbox as an
-ordinary local message: same ids, same guarantees, and a parked
-`beb wait` notices it like any other arrival. A delivery addressed
-to someone else is refused; beb is not a router. Receive is
+`receive` verifies everything (envelope, mailbox, signature)
+before installing the delivery into the mailbox its own `to:` names,
+as an ordinary local message: same ids, same guarantees, and a
+parked `beb wait` notices it like any other arrival. It resolves no
+identity and needs no private key, so it runs anywhere on the
+machine; a delivery for a key with no mailbox here is refused,
+naming `beb init`, because running init is what makes an identity
+live here and mail from outside may not conjure a mailbox nobody
+reads. Reading stays yours alone: `read` resolves the identity under
+your feet and refuses anything addressed elsewhere. Receive is
 idempotent over retained history: the same delivery presented again
 acks the existing id without installing a second copy, so a
 store-and-forward carrier may retry freely.
 
 beb still never touches a network: `pack` makes bytes, `receive`
-accepts bytes, and how they travel — ssh, http, a copied file — is
+accepts bytes, and how they travel (ssh, http, a copied file) is
 your choice.
 
 The full design, including the envelope format, the delivery

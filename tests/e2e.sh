@@ -141,7 +141,7 @@ bx a list || die "list after consume"
 head -1 "$OUT" | grep -q '^2  b' || die "cursor did not advance"
 ok "consume advances cursor"
 
-bx a read 4 || die "inspect 4"
+bx a peek 4 || die "peek 4"
 printf 'raw key send' | diff - "$OUT" >/dev/null || die "inspect body"
 bx a list || die
 test "$(grep -c . "$OUT")" = 5 || die "inspect moved the cursor: $(cat "$OUT")"
@@ -183,9 +183,17 @@ test -s "$OUT" && die "empty backlog printed to stdout"
 grep -q "no new mail" "$ERR" || die "empty backlog message"
 ok "empty backlog: clean exit, says so on stderr"
 
-bx a read 999 && die "missing id accepted"
+bx a peek 999 && die "missing id accepted"
 grep -q "no message 999" "$ERR" || die "missing id refusal"
 ok "inspect of missing id refuses"
+
+# A verb names its effect: read never inspects, peek never consumes.
+bx a read 4 >"$OUT" 2>"$ERR" && die "read with an id accepted"
+grep -q "beb peek ID" "$ERR" || die "read refusal names peek: $(cat "$ERR")"
+CUR=$(cat "$(mbox a)/cursor")
+bx a peek 4 >/dev/null 2>&1 || die "peek 4 again"
+test "$(cat "$(mbox a)/cursor")" = "$CUR" || die "peek moved the cursor"
+ok "read takes no id and peek moves no cursor: the verb is the effect"
 
 bx a list --all || die "list --all"
 grep -q '^1  b' "$OUT" || die "--all hides consumed"
@@ -214,7 +222,7 @@ grep -q "messages/000000000000000090" "$ERR" || die "wrong-to refusal names mess
 grep -q "signatures/000000000000000090" "$ERR" || die "wrong-to refusal names signature"
 ok "consume refuses a valid message addressed elsewhere"
 
-bx d read 90 && die "misaddressed message inspected"
+bx d peek 90 && die "misaddressed message inspected"
 grep -q "someone else" "$ERR" || die "wrong-to inspect refusal"
 ok "inspect refuses it too"
 
@@ -355,20 +363,38 @@ ok "pack: silent success, frame on stdout"
 test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 0 || die "pack touched the recipient mailbox"
 ok "pack delivers nothing"
 
-(cd "$W/m2" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "receive failed: $(cat "$ERR")"
+# receive resolves no identity: the envelope carries its address, so a
+# delivery installs from anywhere, even where no .beb exists.
+(cd "$W/nobody" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "receive failed: $(cat "$ERR")"
 grep -q "^accepted 1; read with: beb read$" "$OUT" || die "receive ack: $(cat "$OUT")"
 (cd "$W/m2" && "$BEB" read) >"$OUT" 2>"$ERR" || die "read received mail"
 printf 'over the wall' | diff - "$OUT" >/dev/null || die "body across the wall: $(cat "$OUT")"
-ok "receive installs an ordinary local message, body exact"
+ok "receive installs by the envelope's address, needing no identity of its own"
 
-(cd "$W/m3" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" && die "misaddressed delivery accepted"
-grep -q "not a router" "$ERR" || die "router refusal text: $(cat "$ERR")"
-test "$(ls "$(mbox m3)/messages" | wc -l | tr -d ' ')" = 0 || die "refused delivery left a message"
-ok "wrong recipient: refused, beb is not a router"
+# Standing in another identity never redirects a delivery: the address
+# decides, not the reader.
+(cd "$W/m1" && "$BEB" pack carrier "second for m2") | (cd "$W/m3" && "$BEB" receive) >"$OUT" 2>"$ERR" || die "receive from m3 failed: $(cat "$ERR")"
+test "$(ls "$(mbox m3)/messages" | wc -l | tr -d ' ')" = 0 || die "delivery landed in the reader's mailbox"
+test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 2 || die "delivery did not land in the addressed mailbox"
+(cd "$W/m2" && "$BEB" read) >"$OUT" 2>"$ERR" || die "read second"
+printf 'second for m2' | diff - "$OUT" >/dev/null || die "second body: $(cat "$OUT")"
+ok "the address decides the mailbox, never the directory receive runs in"
+
+# A mailbox that does not exist here is not conjured by mail arriving:
+# residence is having run beb init, and a stranger is refused.
+ssh-keygen -q -t ed25519 -N "" -C stranger -f "$HOME/stranger" </dev/null || die "keygen stranger"
+echo "stranger $(awk '{print $1" "$2}' "$HOME/stranger.pub")" >>"$KS"
+(cd "$W/m1" && "$BEB" pack stranger "nobody home") >"$HOME/stranger.mbeb" || die "pack stranger"
+(cd "$W/m2" && "$BEB" receive <"$HOME/stranger.mbeb") >"$OUT" 2>"$ERR" && die "delivery for a stranger accepted"
+grep -q "no mailbox here" "$ERR" || die "stranger refusal text: $(cat "$ERR")"
+grep -q "beb init" "$ERR" || die "stranger refusal names the fix: $(cat "$ERR")"
+STRANGER_BOX=$(printf '%s' "$(awk '{print $1" "$2}' "$HOME/stranger.pub")" | shasum -a 256 | awk '{print $1}')
+test -d "$SPOOL/$STRANGER_BOX" && die "refused delivery minted a mailbox"
+ok "no mailbox here: refused, nothing minted, the refusal names beb init"
 
 (cd "$W/m2" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "replay errored"
 grep -q "^accepted 1; already delivered$" "$OUT" || die "replay ack: $(cat "$OUT")"
-test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 1 || die "replay installed a second copy"
+test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 2 || die "replay installed a second copy"
 ok "replay: idempotent, acks the existing id, no second copy"
 
 cp "$HOME/note.mbeb" "$HOME/tampered.mbeb"
@@ -389,7 +415,7 @@ ok "truncated frame refused"
 
 { cat "$HOME/note.mbeb"; printf 'extra'; } | (cd "$W/m2" && "$BEB" receive) >"$OUT" 2>"$ERR" && die "trailing bytes accepted"
 grep -q "trailing" "$ERR" || die "trailing refusal text: $(cat "$ERR")"
-test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 1 || die "trailing garbage installed a message"
+test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 2 || die "trailing garbage installed a message"
 ok "trailing bytes refused, nothing installed"
 
 head -c 1048576 /dev/urandom >"$HOME/bin.body"
@@ -402,7 +428,7 @@ ok "binary body round-trips through a pipe, byte-exact"
 # same delivery installs anew.
 rm "$(mbox m2)/messages/000000000000000001" "$(mbox m2)/signatures/000000000000000001"
 (cd "$W/m2" && "$BEB" receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "post-prune replay failed"
-grep -q "^accepted 3; read with: beb read$" "$OUT" || die "post-prune ack: $(cat "$OUT")"
+grep -q "^accepted 4; read with: beb read$" "$OUT" || die "post-prune ack: $(cat "$OUT")"
 ok "pruned then replayed: the mailbox remembers what it retains"
 
 # The dedup decision is atomic with insertion: 20 concurrent receives of

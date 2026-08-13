@@ -17,17 +17,23 @@ use key::PublicKey;
 use spool::Mailbox;
 
 const USAGE: &str = "\
-beb delivers signed messages between identities.
+beb {version} delivers signed messages between identities.
 
   beb init                    key and mailbox from nothing
-  beb send RECIPIENT [BODY]   body from argument or stdin
-  beb list [--all]            unread by default
+  beb whoami                  your address
+  beb send RECIPIENT [BODY]   sign and deliver, body from argument or stdin
+  beb list [--all]            what is waiting, unread by default
   beb read                    consume the next message
-  beb read ID                 inspect one message
+  beb peek ID                 inspect one message, consuming nothing
   beb wait [-t SECS]          block until the next message arrives
-  beb pack RECIPIENT [BODY]   a signed portable delivery on stdout
-  beb receive                 install one delivery from stdin
-  beb whoami                  your address";
+  beb pack RECIPIENT [BODY]   sign one delivery onto stdout
+  beb receive                 install one delivery from stdin";
+
+/// The usage text names its own version: help that cannot say which
+/// binary printed it is help you have to go check.
+fn usage() -> String {
+    USAGE.replace("{version}", env!("CARGO_PKG_VERSION"))
+}
 
 fn main() {
     // The Rust runtime ignores SIGPIPE; restore the default so
@@ -41,6 +47,7 @@ fn main() {
         Some("send") => cmd_send(&args[1..]),
         Some("list") => cmd_list(&args[1..]),
         Some("read") => cmd_read(&args[1..]),
+        Some("peek") => cmd_peek(&args[1..]),
         Some("wait") => cmd_wait(&args[1..]),
         Some("pack") => cmd_pack(&args[1..]),
         Some("receive") => cmd_receive(&args[1..]),
@@ -49,8 +56,8 @@ fn main() {
             println!("beb {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Some(v) => Err(format!("unknown verb \"{v}\"\n{USAGE}")),
-        None => Err(USAGE.to_string()),
+        Some(v) => Err(format!("unknown verb \"{v}\"\n{}", usage())),
+        None => Err(usage()),
     };
     if let Err(e) = result {
         eprintln!("{e}");
@@ -308,17 +315,20 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
 
 /// receive: one frame from stdin, verified before anything becomes
 /// visible, installed through the same machinery as local delivery.
+/// It resolves no identity: the delivery carries its own address, and
+/// a mailbox that already exists here is what makes that address a
+/// resident. Receiving is not reading, so nothing here needs a private
+/// key.
 fn cmd_receive(args: &[String]) -> Result<(), String> {
     if !args.is_empty() {
         return Err("receive takes nothing; the delivery arrives on stdin".into());
     }
-    let me = identity()?;
     let spool = util::spool_root()?;
     let tmp = spool
         .join(".tmp")
         .join(format!("receive-{}", std::process::id()));
     fs::create_dir_all(&tmp).map_err(|e| format!("cannot create tempdir: {e}"))?;
-    let result = receive_one(&me, &spool, &tmp);
+    let result = receive_one(&spool, &tmp);
     let _ = fs::remove_dir_all(&tmp);
     match result? {
         spool::Delivered::Fresh(id) => println!("accepted {id}; read with: beb read"),
@@ -327,7 +337,7 @@ fn cmd_receive(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn receive_one(me: &Identity, spool: &Path, tmp: &Path) -> Result<spool::Delivered, String> {
+fn receive_one(spool: &Path, tmp: &Path) -> Result<spool::Delivered, String> {
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let (el, sl) = frame::read_header(&mut input)?;
@@ -348,8 +358,17 @@ fn receive_one(me: &Identity, spool: &Path, tmp: &Path) -> Result<spool::Deliver
     if !h.from.is_ed25519() || !h.to.is_ed25519() {
         return Err("envelope has a non-ed25519 key; beb speaks ssh-ed25519 only".into());
     }
-    if h.to.canonical() != me.key.canonical() {
-        return Err("delivery is addressed to someone else; beb is not a router".into());
+    // The envelope names its own mailbox, and an existing mailbox is
+    // the only admission: an identity that has run `beb init` here
+    // lives here, and one that has not cannot be conjured by anything
+    // arriving from outside. So a delivery for a stranger is refused
+    // rather than minting a mailbox nobody reads.
+    let mailbox = Mailbox::of(spool, &h.to.canonical());
+    if !mailbox.dir.is_dir() {
+        return Err(format!(
+            "no mailbox here for {}; its owner claims one with: beb init",
+            &util::sha256_hex(&h.to.canonical())[..8]
+        ));
     }
     sshsig::verify(&env_path, &sig_path, &h.from.canonical(), &tmp.join("verify"))
         .map_err(|e| format!("signature verification failed ({e})"))?;
@@ -357,7 +376,7 @@ fn receive_one(me: &Identity, spool: &Path, tmp: &Path) -> Result<spool::Deliver
     // Idempotent over retained history, atomically: the dedup decision
     // and the insertion happen inside the mailbox lock, so concurrent
     // retries of the same delivery converge to one message.
-    Mailbox::of(spool, &me.key.canonical()).deliver_once(&env_path, &sig_path)
+    mailbox.deliver_once(&env_path, &sig_path)
 }
 
 /// Stream exactly n bytes to a file; fewer is a truncated frame.
@@ -401,39 +420,49 @@ fn cmd_list(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// read consumes: the smallest id above the cursor, then the cursor
+/// moves to it. It takes nothing, because a verb whose effect depended
+/// on whether an argument was present would hide a cursor move behind
+/// output that looks the same either way.
 fn cmd_read(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("read takes nothing; inspect one message with: beb peek ID".into());
+    }
     let me = identity()?;
     let mb = Mailbox::of(&util::spool_root()?, &me.key.canonical());
-    match args {
-        [] => {
-            let cursor = mb.cursor();
-            let next = mb.ids().into_iter().find(|&id| id > cursor);
-            match next {
-                None => {
-                    eprintln!("no new mail; cursor at {cursor}");
-                    Ok(())
-                }
-                Some(id) => {
-                    let h = check(&mb, id, &me)?;
-                    print_body(&mb.message(id), h.body_offset)?;
-                    mb.set_cursor(id)
-                }
-            }
+    let cursor = mb.cursor();
+    match mb.ids().into_iter().find(|&id| id > cursor) {
+        None => {
+            eprintln!("no new mail; cursor at {cursor}");
+            Ok(())
         }
-        [arg] => {
-            let id: u64 = arg
-                .parse()
-                .ok()
-                .filter(|&n| n > 0)
-                .ok_or_else(|| format!("not a message id: \"{arg}\""))?;
-            if !mb.ids().contains(&id) {
-                return Err(format!("no message {id}; beb list --all shows what exists"));
-            }
+        Some(id) => {
             let h = check(&mb, id, &me)?;
-            print_body(&mb.message(id), h.body_offset)
+            print_body(&mb.message(id), h.body_offset)?;
+            mb.set_cursor(id)
         }
-        _ => Err("read takes one id or nothing".into()),
     }
+}
+
+/// peek inspects: same verification, same bytes, and the cursor is
+/// untouched. Looking at a message is not consuming it.
+fn cmd_peek(args: &[String]) -> Result<(), String> {
+    let arg = match args {
+        [one] => one,
+        _ => return Err("peek takes one id: beb peek ID".into()),
+    };
+    let id: u64 = arg
+        .parse()
+        .ok()
+        .filter(|&n| n > 0)
+        .ok_or_else(|| format!("not a message id: \"{arg}\""))?;
+    let me = identity()?;
+    let mb = Mailbox::of(&util::spool_root()?, &me.key.canonical());
+    if !mb.ids().contains(&id) {
+        return Err(format!("no message {id}; beb list --all shows what exists"));
+    }
+    let h = check(&mb, id, &me)?;
+    print_body(&mb.message(id), h.body_offset)
 }
 
 /// Edge-triggered: block until a message arrives after this call starts.

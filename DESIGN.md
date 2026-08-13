@@ -17,9 +17,10 @@ directory. Mail waits until read.
 5. The stored message file is exactly the signed bytes.
 6. Delivery ids are mailbox-local, monotonically increasing, and the
    only ordering. There are no timestamps.
-7. Read state is one integer per mailbox, the cursor. `read` with no
-   argument consumes, advancing the cursor one message through the
-   front of the queue; `read ID` inspects and moves nothing.
+7. Read state is one integer per mailbox, the cursor. `read`
+   consumes, advancing the cursor one message through the front of
+   the queue; `peek ID` inspects and moves nothing. A verb names its
+   effect: nothing about consuming hides behind an argument.
 8. There is no delete verb. Retention is local policy.
 9. Receiving a message triggers nothing.
 
@@ -147,14 +148,19 @@ this leans on are kernel guarantees network filesystems do not keep.
 ## Interface
 
     beb init                    key and mailbox from nothing
-    beb send RECIPIENT [BODY]   body from argument or stdin
-    beb list [--all]            unread by default
-    beb read                    consume the next message
-    beb read ID                 inspect one message
-    beb wait [-t SECS]          block until the next message arrives
-    beb pack RECIPIENT [BODY]   a signed portable delivery on stdout
-    beb receive                 install one delivery from stdin
     beb whoami                  your address
+    beb send RECIPIENT [BODY]   sign and deliver, body from argument or stdin
+    beb list [--all]            what is waiting, unread by default
+    beb read                    consume the next message
+    beb peek ID                 inspect one message, consuming nothing
+    beb wait [-t SECS]          block until the next message arrives
+    beb pack RECIPIENT [BODY]   sign one delivery onto stdout
+    beb receive                 install one delivery from stdin
+
+The order is what a reader meets: who you are, then sending, then
+reading, then the pair that crosses machines. A message is what
+rests in a mailbox, a delivery is one in transit, and mail is the
+mass noun for both.
 
 `init` creates `./.beb`: an ed25519 keypair and a `.gitignore`
 containing `*`, so the key cannot be committed. It refuses if
@@ -197,15 +203,19 @@ watch themselves (a shell hook, a script): the reader blocks by its
 own choice, wake policy stays above beb, and receiving still triggers
 nothing.
 
-`read` with no argument consumes: it takes the smallest delivery id
-above the cursor, verifies its signature, prints the raw body and
-nothing else, and sets the cursor to that id. The cursor only ever
-advances to the message just consumed, so skipping is impossible by
-construction. An empty backlog says so and exits cleanly.
+`read` consumes: it takes the smallest delivery id above the
+cursor, verifies its signature, prints the raw body and nothing
+else, and sets the cursor to that id. The cursor only ever advances
+to the message just consumed, so skipping is impossible by
+construction. An empty backlog says so and exits cleanly. It takes
+no argument, and a stray one is a refusal naming peek.
 
-`read ID` inspects: same verification, same output, and the cursor
+`peek ID` inspects: same verification, same output, and the cursor
 is untouched. Looking at a message is not consuming it. An id that
-does not exist is a refusal.
+does not exist is a refusal. The two are separate verbs because
+their outputs are identical and their effects are not: a cursor
+move must never depend on whether an argument happened to be
+typed.
 
 A message that fails verification, or whose `to:` is not the
 reader's identity, is refused before a byte is printed, the cursor
@@ -249,15 +259,35 @@ counter, or cursor is touched anywhere. Its stdout is the product
 and its success is silent. Bodies stream through disk both ways;
 nothing holds a body in memory.
 
-`receive` installs into the resolved identity's own mailbox and no
-other: a delivery whose `to:` is not the resolved identity is
-refused — beb is not a router, even between two identities on one
-machine. It verifies before anything becomes visible: frame,
-envelope grammar, ed25519 only, recipient binding, signature, and
-only then installs through the same lock, counter, write ordering,
-and durability as local delivery. Failure at any step is fail-closed
+`receive` installs into the mailbox the envelope names, and
+resolves no identity of its own: the delivery already carries its
+address, receiving is not reading, and nothing on this path needs a
+private key. It is the same act as a local `send`, which has always
+written into the recipient's mailbox rather than the sender's — the
+address decides, never the directory the process happens to stand
+in.
+
+An existing mailbox is the whole admission. A delivery for a key
+with no mailbox here is refused, naming `beb init`: running init is
+what makes an identity live on this machine, and nothing arriving
+from outside may conjure a mailbox nobody reads. That is the line
+that keeps a carrier from filling a disk with mailboxes for
+invented keys, and it is why the check is existence rather than
+identity — the spool is the list of who lives here, kept by the
+filesystem, needing no second register.
+
+`receive` verifies before anything becomes visible: frame, envelope
+grammar, ed25519 only, a mailbox that exists, signature, and only
+then installs through the same lock, counter, write ordering, and
+durability as local delivery. Failure at any step is fail-closed
 and leaves nothing visible; as with any delivery, a failure after id
 allocation may leave a gap, and gaps are legal.
+
+Reading stays bound to identity, and that is where the boundary
+lives: `read` and `list` resolve the identity under your feet and
+`read` refuses a message whose `to:` is not that identity. A
+mailbox may receive without a reader present; only its owner can
+consume it.
 
 An installed mbeb is an ordinary local message. `list`, `read`, and
 `wait` cannot tell it crossed a machine; its delivery id is assigned
