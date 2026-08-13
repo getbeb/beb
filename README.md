@@ -143,6 +143,25 @@ verified exactly like a named sender's; it just lists as the full
 public key, which `send` also accepts, so any listed sender is
 addressable as shown.
 
+An address is a public key, so it needs an authentic channel, never
+a private one. Where you already have ssh to the other machine, the
+exchange is two one-liners:
+
+```sh
+# learn theirs
+echo "pve $(ssh pve 'cd ~/work && beb whoami')" >> ~/.config/beb/known_signers
+
+# hand them yours
+echo "mac $(beb whoami)" | ssh pve 'cat >> ~/.config/beb/known_signers'
+```
+
+Anywhere else, `beb whoami` is one line of text: paste it through
+whatever channel you already trust, and prepend the name you want
+to call them. Only first contact needs this. A reply never does:
+`beb list` prints an unknown sender's key in exactly the form
+`send` accepts, so you can answer a stranger before deciding what
+to call them.
+
 ## The spool
 
 Messages rest in `~/.local/share/beb/`, one directory per mailbox,
