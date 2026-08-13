@@ -191,12 +191,17 @@ fn cmd_init() -> Result<(), String> {
         .chars()
         .take(8)
         .collect();
+    // The ack names known_signers as the next step, so the directory it
+    // lives in must exist for an append to land there. beb still never
+    // writes the file itself: the names in it are the reader's.
+    let ks = util::known_signers_path()?;
+    if let Some(dir) = ks.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", util::pretty_path(dir)))?;
+    }
     println!("created .beb/id_ed25519, mailbox {short}...");
     println!("your address: {canonical}");
-    println!(
-        "name it in {}:",
-        util::pretty_path(&util::known_signers_path()?)
-    );
+    println!("name it in {}:", util::pretty_path(&ks));
     println!("<name> {canonical}");
     Ok(())
 }

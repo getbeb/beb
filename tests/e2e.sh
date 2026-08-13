@@ -10,7 +10,6 @@ export HOME=$(mktemp -d)
 unset XDG_DATA_HOME XDG_CONFIG_HOME 2>/dev/null || true
 SPOOL=$HOME/.local/share/beb
 KS=$HOME/.config/beb/known_signers
-mkdir -p "$HOME/.config/beb"
 W=$HOME/work
 mkdir -p "$W"
 
@@ -46,6 +45,14 @@ grep -q "^your address: ssh-ed25519 " "$OUT" || die "init ack: address line"
 grep -q "known_signers" "$OUT" || die "init ack: names the roster"
 grep -q "^<name> ssh-ed25519 " "$OUT" || die "init ack: template line with <name> blank"
 ok "init ack shape"
+
+# The ack names known_signers, so appending to it must work with no
+# mkdir in between: init creates the directory, never the file.
+test -d "$(dirname "$KS")" || die "init did not create $(dirname "$KS")"
+test -e "$KS" && die "init created known_signers; the file is the reader's"
+echo "someone ssh-ed25519 AAAA" >>"$KS" 2>"$ERR" || die "append after init failed: $(cat "$ERR")"
+rm -f "$KS"
+ok "init creates the roster's directory, so its own next step lands"
 
 A=$(addr a)
 case "$A" in "ssh-ed25519 "*) ;; *) die "whoami shape: $A" ;; esac

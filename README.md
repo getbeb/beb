@@ -51,7 +51,6 @@ by `BEB_IDENTITY` for a process that cannot cd.
 Names live in one file, which beb reads and never writes:
 
 ```sh
-mkdir -p ~/.config/beb
 echo "backend $(cd backend && beb whoami)" >> ~/.config/beb/known_signers
 echo "frontend $(cd frontend && beb whoami)" >> ~/.config/beb/known_signers
 ```
