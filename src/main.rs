@@ -154,31 +154,87 @@ fn identity() -> Result<Identity, String> {
     }
 }
 
-fn cmd_init() -> Result<(), String> {
-    if Path::new(".beb").exists() {
-        return Err("already an identity: .beb exists here; rm -r .beb to start over".into());
+/// Where a new identity goes. The same rule every other verb resolves
+/// by: the directory named by BEB_IDENTITY, or the working directory.
+/// init read the working directory alone until 0.5.2, which made it the
+/// one verb that answered about a directory nobody had asked about, and
+/// made the refusal `run beb init there` unfollowable by the caller most
+/// likely to read it.
+fn init_dir() -> Result<(PathBuf, bool), String> {
+    match std::env::var_os("BEB_IDENTITY").filter(|v| !v.is_empty()) {
+        Some(dir) => Ok((PathBuf::from(dir), true)),
+        None => Ok((PathBuf::from("."), false)),
     }
-    fs::create_dir(".beb").map_err(|e| format!("cannot create .beb: {e}"))?;
+}
+
+fn cmd_init() -> Result<(), String> {
+    let (dir, from_env) = init_dir()?;
+    let beb = dir.join(".beb");
+    let shown = |p: &Path| -> String {
+        if from_env {
+            util::pretty_path(p)
+        } else {
+            p.strip_prefix(".").unwrap_or(p).display().to_string()
+        }
+    };
+    // Everything that can refuse, refuses before a key exists. A verb that
+    // generates a keypair and then fails leaves a private key behind and a
+    // directory that answers "already an identity" to the retry.
+    if beb.exists() {
+        return Err(format!(
+            "already an identity: {} exists; rm -r {} to start over",
+            shown(&beb),
+            shown(&beb)
+        ));
+    }
+    if !dir.is_dir() {
+        return Err(format!(
+            "BEB_IDENTITY={} is not a directory; create it or unset BEB_IDENTITY",
+            dir.display()
+        ));
+    }
+    // Two claimants is a refusal everywhere else, so it is a refusal here
+    // rather than something to construct: an identity made in the named
+    // directory while the working directory holds another would leave
+    // every later verb in this cwd refusing to guess between them.
+    if from_env && Path::new(".beb").exists() {
+        return Err(format!(
+            "./.beb already claims this working directory, so an identity at {} \
+would leave both claiming every later command; cd elsewhere or unset BEB_IDENTITY",
+            util::pretty_path(&dir)
+        ));
+    }
+
+    fs::create_dir(&beb).map_err(|e| format!("cannot create {}: {e}", shown(&beb)))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(".beb", fs::Permissions::from_mode(0o700));
+        let _ = fs::set_permissions(&beb, fs::Permissions::from_mode(0o700));
     }
-    fs::write(".beb/.gitignore", "*\n").map_err(|e| format!("cannot write .gitignore: {e}"))?;
+    let private = beb.join("id_ed25519");
+    fs::write(beb.join(".gitignore"), "*\n")
+        .map_err(|e| format!("cannot write .gitignore: {e}"))?;
     let out = Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-q", "-C", "", "-f", ".beb/id_ed25519"])
+        .args(["-t", "ed25519", "-N", "", "-q", "-C", "", "-f"])
+        .arg(&private)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .map_err(|e| format!("cannot run ssh-keygen: {e}"))?;
     if !out.status.success() {
+        let _ = fs::remove_dir_all(&beb);
         return Err(format!(
             "key generation failed: {}",
             util::one_line(&String::from_utf8_lossy(&out.stderr))
         ));
     }
-    let me = identity()?;
+    // Resolved from the directory just written, not from the environment
+    // again: what init reports is what init made.
+    let me = identity_at(&dir).map_err(|e| match e {
+        IdClaim::Absent => "the new identity vanished before it could be read".to_string(),
+        IdClaim::Broken(e) => e,
+    })?;
     let canonical = me.key.canonical();
     let spool = util::spool_root()?;
     let mb = Mailbox::of(&spool, &canonical);
@@ -196,11 +252,11 @@ fn cmd_init() -> Result<(), String> {
     // lives in must exist for an append to land there. beb still never
     // writes the file itself: the names in it are the reader's.
     let ks = util::known_signers_path()?;
-    if let Some(dir) = ks.parent() {
-        fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create {}: {e}", util::pretty_path(dir)))?;
+    if let Some(d) = ks.parent() {
+        fs::create_dir_all(d)
+            .map_err(|e| format!("cannot create {}: {e}", util::pretty_path(d)))?;
     }
-    println!("created .beb/id_ed25519, mailbox {short}...");
+    println!("created {}, mailbox {short}...", shown(&private));
     println!("your address: {canonical}");
     println!("name it in {}:", util::pretty_path(&ks));
     println!("<name> {canonical}");

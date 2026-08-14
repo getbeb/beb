@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "beb"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "libc",
  "sha2",

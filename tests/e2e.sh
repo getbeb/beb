@@ -73,6 +73,44 @@ bx nobody whoami && die "whoami without identity succeeded"
 grep -q "beb init" "$ERR" || die "no-identity refusal names the fix"
 ok "no identity refuses, names beb init"
 
+# init resolved the working directory alone until 0.5.2, while every
+# other verb resolved BEB_IDENTITY. That made init answer about a
+# directory nobody asked about, and made the refusal every other verb
+# speaks ("run beb init there") unfollowable by the caller most likely
+# to read it: one that does not control its cwd.
+mkdir -p "$W/pinned" "$W/elsewhere"
+(cd "$W/elsewhere" && BEB_IDENTITY="$W/pinned" "$BEB" init) >"$OUT" 2>"$ERR" ||
+    die "init with BEB_IDENTITY failed: $(cat "$ERR")"
+test -f "$W/pinned/.beb/id_ed25519" || die "init ignored BEB_IDENTITY: nothing at the named directory"
+test -e "$W/elsewhere/.beb" && die "init wrote to the working directory instead of the named one"
+grep -q "pinned/.beb/id_ed25519" "$OUT" || die "the ack does not name where it wrote: $(cat "$OUT")"
+ok "init honors BEB_IDENTITY, and its ack names the directory it wrote"
+
+(cd / && BEB_IDENTITY="$W/pinned" "$BEB" whoami) >"$OUT" 2>"$ERR" ||
+    die "the pinned identity does not resolve from elsewhere: $(cat "$ERR")"
+grep -q "^ssh-ed25519 " "$OUT" || die "pinned whoami: $(cat "$OUT")"
+ok "an identity made under BEB_IDENTITY answers from any working directory"
+
+# A refusal must leave nothing. Generating a keypair and then failing
+# leaves a private key behind and a directory that answers "already an
+# identity" to the retry.
+mkdir -p "$W/clean"
+(cd "$W/clean" && BEB_IDENTITY="$W/pinned" "$BEB" init) >"$OUT" 2>"$ERR" &&
+    die "init succeeded onto an existing identity"
+grep -q "already an identity" "$ERR" || die "existing-identity refusal: $(cat "$ERR")"
+grep -q "pinned" "$ERR" || die "the refusal names the wrong directory: $(cat "$ERR")"
+test "$(ls -A "$W/clean" | wc -l | tr -d ' ')" = 0 || die "a refused init left litter: $(ls -A "$W/clean")"
+ok "a refused init leaves no key behind, and names the directory it refused about"
+
+# Two claimants is a refusal everywhere else in beb, so it is a refusal
+# here rather than something to construct.
+mkdir -p "$W/fresh"
+(cd "$W/a" && BEB_IDENTITY="$W/fresh" "$BEB" init) >"$OUT" 2>"$ERR" &&
+    die "init built a second claimant over an occupied cwd"
+grep -q "both claiming" "$ERR" || die "two-claimant refusal text: $(cat "$ERR")"
+test -e "$W/fresh/.beb" && die "the refused init created the identity anyway"
+ok "init refuses to make two claimants, rather than leaving every later verb to refuse"
+
 mkid b >/dev/null || die "init b"
 B=$(addr b)
 mkid c >/dev/null || die "init c"
