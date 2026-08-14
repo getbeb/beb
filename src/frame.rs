@@ -19,6 +19,13 @@ pub fn write_header(w: &mut impl Write, envelope: u64, signature: u64) -> io::Re
     writeln!(w, "beb {envelope} {signature}")
 }
 
+/// What `write_header` will occupy. The header is a line rather than a
+/// fixed width, so a caller reporting the size of a whole delivery has
+/// to measure it instead of assuming one.
+pub fn header_len(envelope: u64, signature: u64) -> u64 {
+    format!("beb {envelope} {signature}\n").len() as u64
+}
+
 pub fn read_header(r: &mut impl Read) -> Result<(u64, u64), String> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
@@ -67,6 +74,15 @@ mod tests {
 
     fn parse(bytes: &[u8]) -> Result<(u64, u64), String> {
         read_header(&mut &bytes[..])
+    }
+
+    #[test]
+    fn header_len_matches_what_is_written() {
+        for (e, s) in [(0u64, 0u64), (1, 1), (215, 268), (1_000_000, 8_191)] {
+            let mut buf = Vec::new();
+            write_header(&mut buf, e, s).unwrap();
+            assert_eq!(header_len(e, s), buf.len() as u64, "{e} {s}");
+        }
     }
 
     #[test]

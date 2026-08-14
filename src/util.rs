@@ -113,6 +113,123 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Days between the civil date and 1970-01-01, and back. Howard
+/// Hinnant's algorithms, proleptic Gregorian, valid far past anything
+/// beb will see.
+///
+/// Hand-written for the same reason base64 above is: beb takes no
+/// dependency it can spell out in thirty lines, and a date library is a
+/// large surface for two conversions with exact, testable answers.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Seconds since the epoch as `YYYY-MM-DDTHH:MM:SSZ`. UTC only: a local
+/// offset is a fact about the sender's machine, and the one thing a
+/// timestamp must not do is need context to read.
+pub fn rfc3339(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// The exact shape `rfc3339` writes, and nothing else. A tolerant parser
+/// here would accept a timestamp beb never produces and read it as a
+/// fact, which is the whole thing a signed claim must not become.
+pub fn parse_rfc3339(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':'
+        || b[16] != b':' || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |a: usize, z: usize| -> Option<i64> {
+        let t = &s[a..z];
+        if !t.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        t.parse().ok()
+    };
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, sec) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    let days = days_from_civil(y, mo, d);
+    // Round-trip: rejects 31 April and 30 February, which the ranges
+    // above let through.
+    let (ry, rm, rd) = civil_from_days(days);
+    if (ry, rm, rd) != (y, mo, d) {
+        return None;
+    }
+    Some(days * 86_400 + h * 3600 + mi * 60 + sec)
+}
+
+/// The same instant, in this machine's zone, written the way somebody
+/// reads a clock. The envelope carries UTC and only UTC, so nothing
+/// about the message changes here -- this is display, and display has
+/// one job: `2026-08-15T02:26:34Z` makes a reader do arithmetic to
+/// answer "was that this morning", and `2026-08-15 09:26` does not.
+///
+/// No offset and no seconds. Both are precision for comparing instants
+/// between machines, which is the wire format's job and already done in
+/// the envelope; on a receipt they are characters that carry nothing a
+/// reader in front of their own clock did not already know. The shape
+/// still sorts and still parses, which is the whole of what an agent
+/// needs from it.
+///
+/// `localtime_r` because zone rules are the system's: DST, historical
+/// offsets and the TZ variable are a database, not arithmetic, and beb
+/// already links libc. A failure falls back to UTC rather than inventing
+/// an offset.
+pub fn local_stamp(secs: i64) -> String {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let t = secs as libc::time_t;
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return rfc3339(secs);
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year as i64 + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    )
+}
+
+pub fn now_secs() -> Result<i64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .map_err(|_| "the system clock is before 1970".to_string())
+}
+
 fn urandom(buf: &mut [u8]) -> Result<(), String> {
     File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(buf))
@@ -240,6 +357,62 @@ mod tests {
             sha256_hex(""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn rfc3339_vectors() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_000_000_000), "2001-09-09T01:46:40Z");
+        assert_eq!(rfc3339(1_786_000_000), "2026-08-06T07:06:40Z");
+        // a leap day, and the century rule around it
+        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn rfc3339_round_trips() {
+        for t in [0i64, 1, 951_782_400, 1_000_000_000, 1_786_000_000, 4_102_444_800] {
+            assert_eq!(parse_rfc3339(&rfc3339(t)), Some(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn parse_rfc3339_is_strict() {
+        assert_eq!(parse_rfc3339("2026-08-15T02:26:34Z"), Some(1_786_760_794));
+        assert_eq!(parse_rfc3339(""), None);
+        assert_eq!(parse_rfc3339("2026-08-15T02:26:34"), None);   // no Z
+        assert_eq!(parse_rfc3339("2026-08-15 02:26:34Z"), None);  // space, not T
+        assert_eq!(parse_rfc3339("2026-08-15T02:26:34+00:00"), None);
+        assert_eq!(parse_rfc3339("2026-8-15T02:26:34Z"), None);   // unpadded
+        assert_eq!(parse_rfc3339("2026-13-01T00:00:00Z"), None);  // month 13
+        assert_eq!(parse_rfc3339("2026-04-31T00:00:00Z"), None);  // April has 30
+        assert_eq!(parse_rfc3339("2026-02-30T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339("2025-02-29T00:00:00Z"), None);  // not a leap year
+        assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z").is_some(), true);
+        assert_eq!(parse_rfc3339("2026-08-15T24:00:00Z"), None);
+        assert_eq!(parse_rfc3339("2026-08-15T02:60:00Z"), None);
+    }
+
+    // POSIX does not require localtime_r to consult TZ again once the
+    // zone is cached, so a test that changes TZ has to say so.
+    extern "C" {
+        fn tzset();
+    }
+
+    #[test]
+    fn local_stamp_follows_the_zone() {
+        // The stored value is UTC; only the reading changes.
+        std::env::set_var("TZ", "UTC");
+        unsafe { tzset() };
+        assert_eq!(local_stamp(1_000_000_000), "2001-09-09 01:46");
+        std::env::set_var("TZ", "Asia/Jakarta");
+        unsafe { tzset() };
+        assert_eq!(local_stamp(1_000_000_000), "2001-09-09 08:46");
+        std::env::set_var("TZ", "America/New_York");
+        unsafe { tzset() };
+        // the same instant, in a zone west of UTC and on DST that day
+        assert_eq!(local_stamp(1_000_000_000), "2001-09-08 21:46");
+        std::env::set_var("TZ", "UTC");
+        unsafe { tzset() };
     }
 
     #[test]

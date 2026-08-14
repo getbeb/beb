@@ -64,6 +64,19 @@ impl Mailbox {
             .unwrap_or(0)
     }
 
+    /// Whether this mailbox has an owner on this machine. `init` writes a
+    /// cursor and delivery never does, so the file's existence is the
+    /// sixth spool guarantee made readable: a mailbox with one has a
+    /// reader here, a mailbox without one is holding mail for a key that
+    /// lives somewhere else.
+    ///
+    /// Not `cursor() == 0`. A reader who has consumed nothing has a
+    /// cursor file containing zero, and a stranger has no file at all;
+    /// both read back as zero, and only one of them can ever read.
+    pub fn claimed(&self) -> bool {
+        self.dir.join("cursor").is_file()
+    }
+
     pub fn set_cursor(&self, id: u64) -> Result<(), String> {
         write_atomic(&self.dir.join("cursor"), id.to_string().as_bytes())
             .map_err(|e| format!("cannot write cursor: {e}"))

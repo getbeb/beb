@@ -6,9 +6,9 @@ An identity is an SSH key. A message is signed bytes. A mailbox is a
 directory. Mail waits until read.
 
 ```console
-$ echo "auth endpoint ready" | beb send backend
-accepted 1; mail waits for backend
-$ cd ../backend && beb read
+$ echo "auth endpoint ready" | beb send backend --subject "endpoint ready"
+beb: accepted for backend; 20 bytes; it waits on this machine for beb read
+$ BEB_IDENTITY=~/work/backend beb read
 auth endpoint ready
 ```
 
@@ -44,50 +44,103 @@ mkdir backend frontend
 ```
 
 Each `init` creates a `.beb/` holding an ed25519 keypair, a mailbox,
-and a `.gitignore` that keeps the key out of your repo. An identity is
-that directory: beb uses the `.beb` under your feet, or the one named
-by `BEB_IDENTITY` for a process that cannot cd.
+and a `.gitignore` that keeps the key out of your repo.
+
+An identity is that directory, and `BEB_IDENTITY` names it. Every verb
+but `init` reads it and nothing else: not the working directory, so
+`cd` moves the shell and never the signer. Set it once, wherever you
+decide such things:
+
+```sh
+export BEB_IDENTITY=$PWD/frontend
+```
 
 Names live in one file, which beb reads and never writes:
 
 ```sh
-echo "backend $(cd backend && beb whoami)" >> ~/.config/beb/known_signers
-echo "frontend $(cd frontend && beb whoami)" >> ~/.config/beb/known_signers
+echo "backend  $(BEB_IDENTITY=$PWD/backend beb whoami)"  >> ~/.config/beb/known_signers
+echo "frontend $(BEB_IDENTITY=$PWD/frontend beb whoami)" >> ~/.config/beb/known_signers
 ```
+
+Each of those prints `beb: identity from ...` to stderr as it runs.
+Command substitution captures stdout only, so beb's own commentary
+reaches you rather than the file. Everything beb says about a result
+goes to stderr with a `beb: ` prefix, which is what makes
+`2>&1 | grep -v '^beb:'` give you back exactly the result.
 
 Then mail flows by name:
 
 ```sh
-cd frontend
-echo "auth endpoint ready" | beb send backend   # accepted 1; mail waits for backend
+export BEB_IDENTITY=$PWD/frontend
+echo "auth endpoint ready" | beb send backend --subject "endpoint ready"
 
-cd ../backend
-beb list                                        # 1  frontend
-beb read                                        # auth endpoint ready
+export BEB_IDENTITY=$PWD/backend
+beb list        # beb: cursor at 0; 1 total, 1 unread; showing 1
+                # 1  now  endpoint ready  frontend
+beb read        # auth endpoint ready
 ```
+
+For a shell, direnv or a line in your profile pins it. For an agent,
+the harness does: [claude-beb](https://github.com/getbeb/claude-beb)
+pins the session's launch directory at start, so a session that
+wanders between subdirectories keeps signing as whoever it began as.
 
 ## Commands
 
 ```console
 $ beb
-beb 0.5.0 delivers signed messages between identities.
+beb 0.6.0 delivers signed messages between identities.
 
-  beb init                    key and mailbox from nothing
-  beb whoami                  your address
-  beb send RECIPIENT [BODY]   sign and deliver, body from argument or stdin
-  beb list [--all]            what is waiting, unread by default
-  beb read                    consume the next message
-  beb peek ID                 inspect one message, consuming nothing
-  beb wait [-t SECS]          block until the next message arrives
-  beb pack RECIPIENT [BODY]   sign one delivery onto stdout
-  beb receive                 install one delivery from stdin
+  beb init
+      a new identity in this directory
+  beb whoami
+      your address
+
+  beb send RECIPIENT --subject S [--body B]
+      sign and deliver; the body comes from --body or stdin
+  beb list [--from ID] [--limit N]
+      what is waiting, the next 10 by default
+  beb read
+      the next unread message; moves the cursor past it
+  beb peek ID
+      one message by id; the cursor does not move
+  beb wait [--from ID] [--timeout SECS]
+      block until there is unread mail; prints the mark to wait from next
+
+  beb pack RECIPIENT --subject S [--body B]
+      sign one delivery onto stdout
+  beb receive
+      install one delivery from stdin
+
+  beb --help
+      this list
+  beb --version
+      the version alone
+
+BEB_IDENTITY names the directory holding the .beb to act as. Every verb
+requires it except init, which never reads it and always writes here:
+
+  export BEB_IDENTITY=/path/to/dir
 ```
 
-`wait` blocks on a kernel watch rather than polling and returns on the
-next arrival, so a worker sleeps until there is work:
+`wait` blocks on a kernel watch rather than polling and returns as soon
+as there is unread mail, so a worker sleeps until there is work and
+never sleeps while work is waiting:
 
 ```sh
 while beb wait; do beb read | ./handle-job; done
+```
+
+It waits from your cursor by default. A waiter that must not fire twice
+for the same mail — a doorbell that wakes a session, say — keeps its own
+mark instead: `wait` prints the next mark on stdout, and `--from` takes
+it back.
+
+```sh
+m=$(beb wait --timeout 0)
+while :; do
+    m=$(beb wait --from "$m" --timeout 900) && notify
+done
 ```
 
 ## Design
