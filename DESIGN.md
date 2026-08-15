@@ -164,7 +164,14 @@ and must stay exactly that:
 
     $ beb whoami
     ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
-    beb: identity from BEB_IDENTITY=~/project/backend
+    beb: identity from BEB_IDENTITY=~/project/backend, named backend here
+
+The name is said and not printed, and the difference is load-bearing.
+An address is a hash input as well as text -- a mailbox directory is
+sha256 of exactly these bytes -- so a `<name> <address>` line here,
+tempting because that is the shape of the file the address is bound
+for, would silently hash to a mailbox that does not exist. `contacts`
+prints that line; `whoami` prints the thing the line is about.
 
 `init` is the exception, and never reads `BEB_IDENTITY` at all. It
 writes to the working directory, full stop.
@@ -203,8 +210,9 @@ reaches that state, and so does a spool that was deleted, an
 back the identity but not the mail. All of them want the same thing,
 so none of them needs telling apart:
 
-    $ beb init
+    $ beb init backend
     ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+    beb: named backend in ~/.config/beb/known_signers
     beb: claimed mailbox 714889c0 in ~/.local/share/beb for the .beb
          already here, cursor at 0
     beb: 2 already waiting; beb list shows them
@@ -235,10 +243,12 @@ already there, so the session that runs `init` is precisely the
 session not pinned to what it just built. An ack that stopped at the
 address would hand back an identity nothing in that shell can use:
 
-    $ beb init
+    $ beb init backend
     ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
     beb: created .beb/id_ed25519, mailbox c97e8412 in
          ~/.local/share/beb, cursor at 0
+    beb: named backend in ~/.config/beb/known_signers; anything here
+         reaches it as: beb send backend
     beb: every other verb needs BEB_IDENTITY set: export
          BEB_IDENTITY=$PWD
     beb: beb whoami prints your address; give it to whoever should
@@ -264,12 +274,62 @@ format:
       backend   ssh-ed25519 AAAA...
       frontend  ssh-ed25519 AAAA...
 
-beb reads this file and never writes it. It honors a subset: one
-literal principal, key type, base64, optional comment, blank lines,
-`#` comments. Anything more (options, wildcards, comma-separated
-principals, any key type but ssh-ed25519) is refused by name when
-that name is used, never misparsed; such lines do not poison the
-rest of the file.
+beb reads this file, and appends to it in exactly one place: `init`,
+which writes the name it was given beside the key it just made. It
+honors a subset: one literal principal, key type, base64, optional
+comment, blank lines, `#` comments. Anything more (options,
+wildcards, comma-separated principals, any key type but ssh-ed25519)
+is refused by name when that name is used, never misparsed; such
+lines do not poison the rest of the file.
+
+What `init` may write is stricter than what the parser will read. A
+name it appends has to read back as exactly one usable principal, so
+whitespace, a leading `#`, `=`, `,`, the wildcards and control
+characters are all refused by character before a key exists. The
+reader's own lines are never rewritten, reordered or removed: beb
+adds a line, and a roster whose last line has no trailing newline
+gets one first, because joining two names into one unusable line
+would damage an entry that was already there.
+
+The name is not the address. The key is, and `send` takes it
+directly: a raw key works and always has, and resolution is
+addressing and display only. What a name buys is that nothing has to
+type 68 characters of base64, which is why `init` takes one at the
+single moment the key is in front of it rather than leaving it to a
+second step done by hand.
+
+`contacts` reads the file back out, in the file's own format, so a
+line is copied rather than transcribed:
+
+    $ beb contacts
+    beb: 3 of 5 names in ~/.config/beb/known_signers; backend is this
+         identity
+    backend   ssh-ed25519 AAAA...
+    frontend  ssh-ed25519 AAAA...
+    herdr     ssh-ed25519 AAAA...
+    beb: line 4 is not usable (key type ssh-rsa); it is refused by
+         name when used
+
+Nothing marks the row that is this identity, however useful that
+would be to look at. The reason to print roster lines at all is that
+they append to somebody else's `known_signers` verbatim, and an
+annotation would make exactly one line in the output the one that
+cannot. Which name is yours is a thing said about the list, so it is
+said where beb says everything else.
+
+A line the parser cannot use is reported rather than dropped, and
+reported on stderr, because it is not a line anybody can paste. A
+name that vanished from the listing would be a name whose refusal
+arrives later, at a send, with nothing to connect it to. It does not
+set the column either: one broken line should not indent every good
+one to fit a name that was never printed.
+
+Until 0.8.0 there was nothing to read back. Your own key in your own
+roster bought you nothing, because nothing put it there; the file was
+purely a list of other people. `init NAME` changed what the file is
+for -- it now names the rooms of this machine as well as the people
+outside it -- and a file beb writes is a file beb should be able to
+show you.
 
 Resolution is addressing and display only. Verification never
 consults the roster; `read` verifies against the envelope's `from:`
@@ -419,10 +479,12 @@ this leans on are kernel guarantees network filesystems do not keep.
 
 ## Interface
 
-    beb init
-        a new identity in this directory
+    beb init NAME
+        a new identity in this directory, and a name resolving to it
     beb whoami
-        your address
+        your address, and the name that resolves to it here
+    beb contacts
+        every name this machine resolves, as known_signers lines
 
     beb send RECIPIENT --subject S [--body B]
         sign and deliver; the body comes from --body or stdin
@@ -482,7 +544,7 @@ containing `*`, so the key cannot be committed. It refuses if
 shaped for the file where names live; the one blank is never beb's
 to fill.
 
-    $ cd ~/project/backend && beb init
+    $ cd ~/project/backend && beb init backend
     created .beb/id_ed25519, mailbox 9288c075...
     your address: ssh-ed25519 AAAA...
     name it in ~/.config/beb/known_signers:
@@ -782,7 +844,7 @@ with nothing to capture writes nothing to stdout at all.
 address, the same bytes `whoami` prints, bound for a `known_signers`
 line on somebody else's machine:
 
-    $ beb init
+    $ beb init backend
     ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
     beb: created .beb/id_ed25519, mailbox c97e8412 in
          ~/.local/share/beb, cursor at 0

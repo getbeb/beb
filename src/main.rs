@@ -28,10 +28,12 @@ use spool::Mailbox;
 const USAGE: &str = "\
 beb {version} delivers signed messages between identities.
 
-  beb init
-      a new identity in this directory
+  beb init NAME
+      a new identity in this directory, and a name resolving to it
   beb whoami
-      your address
+      your address, and the name that resolves to it here
+  beb contacts
+      every name this machine resolves, as known_signers lines
 
   beb send RECIPIENT --subject S [--body B]
       sign and deliver; the body comes from --body or stdin
@@ -179,6 +181,7 @@ fn main() {
         Some("pack") => cmd_pack(&args[1..]),
         Some("receive") => cmd_receive(&args[1..]),
         Some("whoami") => cmd_whoami(),
+        Some("contacts") => cmd_contacts(&args[1..]),
         Some("--version") => {
             println!("beb {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -339,21 +342,58 @@ fn pin_note() {
 }
 
 fn cmd_init(args: &[String]) -> Result<(), Fail> {
-    // `beb init alpha` is the first thing a reader tries when they want an
-    // identity somewhere else, and until 0.5.3 it silently ignored the
-    // argument and wrote a keypair into the working directory instead:
-    // the wrong identity, in the wrong place, discovered later. Every
-    // other verb refuses what it does not take. The refusal echoes the
-    // argument back inside the form that works, so the fix is one line to
-    // copy rather than a rule to go and learn.
-    if let Some(a) = args.first() {
-        return Err(if a.starts_with('-') {
-            format!("init takes nothing, and there is no option \"{a}\"")
-        } else {
-            format!("init takes nothing; for an identity in {a}: (cd {a} && beb init)")
+    // The name is required, and it is not the address: the key is. A
+    // name is a local alias that resolves to one, and `send` takes
+    // either -- a raw key works and always has. What the name buys is
+    // that nobody has to type 68 characters of base64, and naming used
+    // to be a second step done by hand: append a line to a file, in a
+    // format you had to know, with the key pasted in. Every identity
+    // made on this machine needed it eventually, so init takes it at the
+    // one moment the key is in front of it. A machine holding many
+    // identities is a building of rooms, and a room with no nameplate is
+    // one you can only reach by knowing its exact coordinates.
+    let name = match args.len() {
+        1 => args[0].clone(),
+        0 => {
+            return Err(Fail::from(
+                "init needs a name for this identity: beb init NAME\nthe address is the key; the name is what resolves to it here",
+            ))
         }
+        _ => {
+            return Err(
+                format!("init takes one name: beb init {}", args[0]).into()
+            )
+        }
+    };
+    if let Some(a) = name.strip_prefix('-') {
+        let _ = a;
+        return Err(format!("init takes a name, and there is no option \"{name}\"").into());
+    }
+    // `beb init alpha` used to mean "make an identity in ./alpha", and
+    // silently wrote one here instead until 0.5.3. It means the name
+    // now, so only an argument shaped like a path still needs the old
+    // answer -- and it is still a cd, because init writes where it runs.
+    if name.contains('/') {
+        return Err(format!(
+            "\"{name}\" reads as a directory, not a name; for an identity there: (cd {name} && beb init NAME)"
+        )
         .into());
     }
+    roster::validate_name(&name).map_err(Fail::from)?;
+
+    // Read before anything is made. A name already spoken for is a
+    // refusal, and every refusal init can speak comes before a key
+    // exists on disk.
+    let ks = util::known_signers_path()?;
+    let roster_lines = roster::load(&ks);
+    let taken = roster_lines.iter().find(|l| l.name == name);
+    let already_taken = |l: &roster::Line| -> Fail {
+        refused(format!(
+            "\"{name}\" already names an identity, on line {} of {}\npick another name, or remove that line",
+            l.lineno,
+            util::pretty_path(&ks)
+        ))
+    };
     // The working directory, always. `BEB_IDENTITY` says which identity
     // to act as, and `init` does not act as one -- it makes one -- so
     // reading the pin here was a category error. It also cost four
@@ -399,10 +439,24 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
                 shown(&beb)
             )));
         }
+        // The name may already be this identity's, which is what a
+        // re-run of the same init looks like: not an error, and not a
+        // second line saying the same thing twice.
+        let named_already = match taken {
+            Some(l) if l.key.as_ref().map(|k| k.canonical()) == Some(me.key.canonical()) => true,
+            Some(l) => return Err(already_taken(l)),
+            None => false,
+        };
         mb.ensure()?;
         mb.set_cursor(0)?;
         let waiting = mb.ids().len();
+        if !named_already {
+            roster::append(&ks, &name, &me.key.canonical())?;
+        }
         println!("{}", me.key.canonical());
+        if !named_already {
+            note(&format!("named {name} in {}", util::pretty_path(&ks)));
+        }
         note(&format!(
             "claimed mailbox {} in {} for the {} already here, cursor at 0",
             &util::sha256_hex(&me.key.canonical())[..8],
@@ -422,6 +476,13 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
     }
     // No "is not a directory" refusal any more: the target is the
     // working directory, which exists by definition of being in it.
+
+    // Nothing here holds a key yet, so a name already in the file cannot
+    // be this identity's. Refused before ssh-keygen runs, like every
+    // other refusal init speaks.
+    if let Some(l) = taken {
+        return Err(already_taken(l));
+    }
 
     fs::create_dir(&beb).map_err(|e| format!("cannot create {}: {e}", shown(&beb)))?;
     #[cfg(unix)]
@@ -466,14 +527,10 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
         .chars()
         .take(8)
         .collect();
-    // The ack names known_signers as the next step, so the directory it
-    // lives in must exist for an append to land there. beb still never
-    // writes the file itself: the names in it are the reader's.
-    let ks = util::known_signers_path()?;
-    if let Some(d) = ks.parent() {
-        fs::create_dir_all(d)
-            .map_err(|e| format!("cannot create {}: {e}", util::pretty_path(d)))?;
-    }
+    // The name lands last, after the identity it names exists and its
+    // mailbox is claimed, so a failure anywhere above leaves no line
+    // pointing at a key that was never made.
+    roster::append(&ks, &name, &canonical)?;
     // The address is the artifact and goes out alone, because it is the
     // same bytes `whoami` prints and lands in the same place: a
     // known_signers line on someone else's machine. Everything else init
@@ -484,6 +541,10 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
         shown(&private),
         util::pretty_path(&spool)
     ));
+    note(&format!(
+        "named {name} in {}; beb send {name} now resolves to that key",
+        util::pretty_path(&ks)
+    ));
     // The seam init has to name. Every other verb resolves the pin, and
     // the pin cannot have existed a moment ago, because there was no
     // identity for it to name. A harness that sets it does so at a
@@ -493,11 +554,13 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
     // session that is not pinned to what it just made. Saying the export
     // here is the difference between an identity and a dead one.
     pin_note();
-    // Not "name it here". The roster is reader-owned, so your own key in
-    // your own known_signers buys you nothing; the file this address
-    // belongs in is your correspondent's. The line format is not
-    // repeated here either -- resolve() already prints it at the one
-    // moment anybody needs it, which is a name that did not resolve.
+    // Not "name it here" -- init just did, and said so above. What this
+    // address is still for is somebody else's machine, where the name
+    // is theirs to pick: a roster is the reader's, so the name written
+    // here is a local alias, never a fact about their file. The line
+    // format is not repeated at this point either; `contacts` prints
+    // lines in it, and resolve() prints one at the moment anybody needs
+    // it, which is a name that did not resolve.
     // Not "the line above". The ack names two identifiers, a mailbox and
     // a key, so a reader working out what `send` wants does have to be
     // told which -- but "above" is a claim about layout, and layout is
@@ -510,9 +573,10 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
     // No roster hint here. `init` is the one moment nobody has a
     // correspondent to name, so the line landed where it could not be
     // acted on; `read` carries it now, at the moment a reader is looking
-    // at a sender it cannot name.
+    // at a sender it cannot name. What init does say is the name it just
+    // wrote, because that line is the difference between an address
+    // anybody can type and 68 characters of base64.
     note("beb whoami prints your address; give it to whoever should reach you");
-    let _ = &ks;
     Ok(())
 }
 
@@ -525,8 +589,104 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
 /// the failure this line exists to make visible.
 fn cmd_whoami() -> Result<(), Fail> {
     let me = identity()?;
+    // The address alone, and deliberately not `<name> <address>`. A
+    // known_signers line is that shape and it is tempting to print one
+    // here, but the address is a hash input, not only text: a mailbox
+    // directory is sha256 of exactly these bytes, and beb-ssh computes
+    // one by hashing what this prints. A name in front would silently
+    // hash to a mailbox that does not exist. `contacts` prints the
+    // pasteable line; this prints the thing the line is about.
     println!("{}", me.key.canonical());
-    note(&format!("identity from BEB_IDENTITY={}", me.source));
+    // The name is worth saying now, and was not before 0.8.0: until
+    // `init` took one, beb usually had no name for you, so there was
+    // nothing here to report.
+    let named = util::known_signers_path()
+        .ok()
+        .map(|p| roster::load(&p))
+        .and_then(|lines| roster::reverse(&lines, &me.key.canonical()).map(str::to_string));
+    match named {
+        Some(name) => note(&format!(
+            "identity from BEB_IDENTITY={}, named {name} here",
+            me.source
+        )),
+        None => note(&format!("identity from BEB_IDENTITY={}", me.source)),
+    }
+    Ok(())
+}
+
+/// contacts: every name this machine can resolve, in the file's own
+/// format, so a line is copied rather than transcribed.
+///
+/// stdout is `<name> <key>` and nothing else -- no marker beside the
+/// line that is this identity, however useful that would be to look at.
+/// The whole value of printing roster lines is that they append to
+/// somebody else's known_signers verbatim, and a trailing annotation
+/// would make exactly one line in the output the one that cannot.
+/// Which line is yours is a thing said about the list, so it is said on
+/// stderr with everything else beb says.
+///
+/// Lines the parser cannot use are shown too, with the reason. A name
+/// that silently vanished from a listing would be a name whose refusal
+/// arrives later, at a send, with nothing to connect it to.
+fn cmd_contacts(args: &[String]) -> Result<(), Fail> {
+    if let Some(a) = args.first() {
+        return Err(format!("contacts takes nothing: beb contacts (got \"{a}\")").into());
+    }
+    let me = identity()?;
+    let path = util::known_signers_path()?;
+    let lines = roster::load(&path);
+    let pretty = util::pretty_path(&path);
+    if lines.is_empty() {
+        return Err(nothing(format!(
+            "no names in {pretty}; beb init NAME writes one, and read names a sender you can add"
+        )));
+    }
+    let mine = me.key.canonical();
+    // Only usable names set the column. An unusable line is reported on
+    // stderr rather than printed, so letting its name widen the rows
+    // would indent every pasteable line to fit one that is not there.
+    let width = lines
+        .iter()
+        .filter(|l| l.key.is_some())
+        .map(|l| l.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let usable = lines.iter().filter(|l| l.key.is_some()).count();
+    let self_name = roster::reverse(&lines, &mine).map(str::to_string);
+    match &self_name {
+        Some(n) => note(&format!(
+            "{usable} of {} names in {pretty}; {n} is this identity",
+            lines.len()
+        )),
+        None => note(&format!(
+            "{usable} of {} names in {pretty}; this identity is not among them",
+            lines.len()
+        )),
+    }
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    for l in &lines {
+        let pad = " ".repeat(width - l.name.chars().count());
+        match (&l.key, &l.issue) {
+            (Some(k), _) => writeln!(out, "{}{pad} {}", l.name, k.canonical()),
+            // Said on stderr, because it is not a line anybody can paste.
+            (None, issue) => {
+                note(&format!(
+                    "line {} is not usable ({}); it is refused by name when used",
+                    l.lineno,
+                    match issue {
+                        Some(roster::Issue::Options) => "carries options".to_string(),
+                        Some(roster::Issue::Wildcard) => "the name is a pattern".to_string(),
+                        Some(roster::Issue::Comma) => "several principals".to_string(),
+                        Some(roster::Issue::KeyType(t)) => format!("key type {t}"),
+                        _ => "malformed".to_string(),
+                    }
+                ));
+                Ok(())
+            }
+        }
+        .map_err(|e| format!("cannot write: {e}"))?;
+    }
     Ok(())
 }
 

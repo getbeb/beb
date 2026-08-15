@@ -41,7 +41,12 @@ pin() { local d=$1; shift; BEB_IDENTITY="$W/$d" "$BEB" "$@"; }
 bx() { local d=$1; shift; pin "$d" "$@" >"$OUT" 2>"$ERR"; }
 # init is the exception, and is run the way a person runs it: unpinned,
 # from the directory that is about to become an identity.
-mkid() { mkdir -p "$W/$1" && (cd "$W/$1" && "$BEB" init) >"$OUT" 2>"$ERR"; }
+mkid() { mkdir -p "$W/$1" && (cd "$W/$1" && "$BEB" init "$1") >"$OUT" 2>"$ERR"; }
+# Every init names its identity now, so a sender that has to arrive
+# unnamed -- the way mail from another machine does -- has its line
+# taken back out. The file stays the reader's to edit; beb only ever
+# adds to it.
+unname() { grep -v "^$1 " "$KS" >"$KS.un" 2>/dev/null; mv "$KS.un" "$KS"; }
 addr() { pin "$1" whoami 2>/dev/null; }
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi; }
 mbox() { echo "$SPOOL/$(printf '%s' "$(addr "$1")" | sha)"; }
@@ -99,8 +104,8 @@ ok "a non-verb refuses in one prefixed line naming beb --help"
 # where a transport inheriting stdout could not tell prose from an
 # artifact.
 mkdir -p "$W/um1" "$W/um2"
-(cd "$W/um1" && "$BEB" init) >/dev/null 2>&1 || die "init um1"
-(cd "$W/um2" && "$BEB" init) >/dev/null 2>&1 || die "init um2"
+(cd "$W/um1" && "$BEB" init um1) >/dev/null 2>&1 || die "init um1"
+(cd "$W/um2" && "$BEB" init um2) >/dev/null 2>&1 || die "init um2"
 UM2=$(addr um2)
 pin um1 pack "$UM2" --subject "merged" --body "the body" >"$HOME/um.mbeb" 2>/dev/null || die "pack um"
 
@@ -141,11 +146,16 @@ grep -q "^beb: created .beb/id_ed25519, mailbox .*, cursor at 0$" "$ERR" || die 
 # one reported the address glued to the end of the previous sentence.
 grep -qi "above" "$ERR" && die "init ack points at a position the output may not have: $(cat "$ERR")"
 grep -q "^beb: beb whoami prints your address" "$ERR" || die "init ack: names the verb that reprints it"
-# init no longer names the roster. It is the one moment nobody has a
-# correspondent to name, and an agent reading beb cold called the line
-# irrelevant to every task it had. `read` carries it instead, when a
-# sender is actually in front of you and cannot be named.
-grep -q "known_signers" "$ERR" && die "init still names the roster, where nobody can act on it"
+# init names the roster because it wrote to it: the name it just took
+# is the difference between an address anybody can type and 68
+# characters of base64, and the line saying so is a fact about what
+# happened, not an instruction to go and do something.
+grep -qE "^beb: named [^ ]+ in .*known_signers" "$ERR" ||
+    die "init does not say what it named or where: $(cat "$ERR")"
+# Still no paste template. That belongs to `read`, at the moment a
+# sender is in front of you and cannot be named; here it would be a
+# rule to learn about a file init has already written.
+grep -q "append a line" "$ERR" && die "init carries a roster template nobody needs here"
 grep -v '^beb:' "$ERR" | grep -q . && die "unprefixed line on stderr: $(cat "$ERR")"
 # The roster template used to be printed here, pointing at the reader's
 # own known_signers -- a file their own key does nothing in. It lives at
@@ -157,15 +167,19 @@ ok "init ack shape: the address on stdout, everything about it prefixed on stder
 # stdout alone and lets stderr past unfiltered. So the merge has to be
 # reversible, which is the whole job of the prefix.
 mkdir -p "$W/merged"
-(cd "$W/merged" && "$BEB" init 2>&1) | grep -v '^beb:' >"$OUT"
+(cd "$W/merged" && "$BEB" init merged 2>&1) | grep -v '^beb:' >"$OUT"
 test "$(cat "$OUT")" = "$(addr merged)" ||
     die "2>&1 | grep -v '^beb:' did not reconstruct stdout: $(cat "$OUT")"
 ok "a merged stream un-merges: grep -v '^beb:' is exactly stdout"
 
-# The ack names known_signers, so appending to it must work with no
-# mkdir in between: init creates the directory, never the file.
+# init writes the roster now, so it makes both the directory and the
+# file, and what it writes reads back as exactly one usable name. beb
+# still adds nothing else: the reader's own lines are never touched,
+# which the merge test below proves against a file written by hand.
 test -d "$(dirname "$KS")" || die "init did not create $(dirname "$KS")"
-test -e "$KS" && die "init created known_signers; the file is the reader's"
+test -f "$KS" || die "init did not write $KS"
+grep -qE "^merged ssh-ed25519 [A-Za-z0-9+/]+$" "$KS" ||
+    die "the line init wrote is not one usable name: $(cat "$KS")"
 echo "someone ssh-ed25519 AAAA" >>"$KS" 2>"$ERR" || die "append after init failed: $(cat "$ERR")"
 rm -f "$KS"
 ok "init creates the roster's directory, so its own next step lands"
@@ -177,36 +191,96 @@ ok "whoami is the address"
 grep -qx '\*' "$W/a/.beb/.gitignore" || die "gitignore content"
 ok "init writes .beb/.gitignore"
 
-(cd "$W/a" && "$BEB" init) >"$OUT" 2>"$ERR" && die "second init succeeded"
+(cd "$W/a" && "$BEB" init a) >"$OUT" 2>"$ERR" && die "second init succeeded"
 grep -q "already an identity" "$ERR" || die "double init refusal text"
 ok "init refuses twice"
 
-# `beb init alpha` is the first thing anybody tries, and it silently
-# ignored the argument until 0.5.3, writing a keypair into the working
-# directory instead: the wrong identity, in the wrong place, found out
-# about later. Every other verb refuses what it does not take.
-mkdir -p "$W/argtest" && (cd "$W/argtest" && "$BEB" init sub) >"$OUT" 2>"$ERR" &&
-    die "init accepted a positional directory and did something else with it"
-grep -q '^beb: init takes nothing; for an identity in sub: (cd sub && beb init)$' "$ERR" ||
-    die "init argument refusal does not echo the working form: $(cat "$ERR")"
+# The argument is the name now, so only one shaped like a path still
+# needs the old answer: `beb init alpha/` is somebody reaching for the
+# pre-0.8.0 meaning, and the fix is still a cd, because init writes
+# where it runs.
+mkdir -p "$W/argtest" && (cd "$W/argtest" && "$BEB" init sub/) >"$OUT" 2>"$ERR" &&
+    die "init accepted a path-shaped name"
+grep -q 'reads as a directory, not a name' "$ERR" ||
+    die "init did not read a path-shaped name as a place: $(cat "$ERR")"
+grep -q '(cd sub/ && beb init NAME)' "$ERR" ||
+    die "the refusal does not name the working form: $(cat "$ERR")"
 test -e "$W/argtest/.beb" && die "the refused init still created an identity in the cwd"
-ok "init refuses a stray argument instead of quietly making the wrong identity"
+ok "a path-shaped name is refused as a place, and the refusal names the cd"
+
+# A name the roster cannot carry is refused before a key exists, and
+# the refusal says which character it is, not just that the name is bad.
+(cd "$W/argtest" && "$BEB" init 'two words') >"$OUT" 2>"$ERR" && die "init took a name with a space"
+grep -q 'a name is one word' "$ERR" || die "space refusal: $(cat "$ERR")"
+(cd "$W/argtest" && "$BEB" init 'a*b') >"$OUT" 2>"$ERR" && die "init took a wildcard name"
+grep -q '"\*" is not allowed in a name' "$ERR" || die "wildcard refusal: $(cat "$ERR")"
+(cd "$W/argtest" && "$BEB" init '#x') >"$OUT" 2>"$ERR" && die "init took a comment name"
+grep -q 'a line starting with # is a comment' "$ERR" || die "comment refusal: $(cat "$ERR")"
+test -e "$W/argtest/.beb" && die "a refused name still made a key"
+ok "a name the roster could not carry is refused, by character, before any key exists"
+
+# What init says about the name has to be true: the key is the address,
+# the name resolves to it, and sending to the key directly still works.
+mkid namedid >/dev/null || die "init namedid"
+NID=$(addr namedid)
+mkid sender2 >/dev/null || die "init sender2"
+pin sender2 send namedid --subject "by name" --body x >/dev/null 2>&1 || die "send by name"
+pin sender2 send "$NID" --subject "by key" --body x >/dev/null 2>&1 || die "send by key"
+bx namedid list || die "list namedid"
+test "$(grep -c 'by name\|by key' "$OUT")" = 2 ||
+    die "name and key did not reach one mailbox: $(cat "$OUT")"
+ok "the name resolves to the address; the key still addresses it directly"
+
+# whoami says the name as well as the address, because init took one.
+# The address stays alone on stdout: a mailbox is sha256 of exactly
+# those bytes, and beb-ssh computes one by hashing what whoami prints.
+bx namedid whoami || die "whoami named"
+test "$(cat "$OUT")" = "$NID" || die "whoami stdout is not the address alone: $(cat "$OUT")"
+grep -q "named namedid here" "$ERR" || die "whoami does not say the name: $(cat "$ERR")"
+ok "whoami names the identity on stderr and keeps the address alone on stdout"
+
+# contacts prints the file's own format, so a line appends to somebody
+# else's known_signers verbatim -- which means no marker on the line
+# that is this identity, however useful that would be to look at.
+bx namedid contacts || die "contacts"
+grep -q "^namedid ssh-ed25519 " "$OUT" || die "contacts row shape: $(cat "$OUT")"
+grep -qE '<-|this identity' "$OUT" && die "contacts marked a row and made it unpasteable: $(cat "$OUT")"
+grep -q "namedid is this identity" "$ERR" || die "contacts does not say which is you: $(cat "$ERR")"
+# Every stdout line parses as a roster line, which is the whole claim.
+# Not `read n ...`: n is this suite's test counter, and clobbering it
+# silently restarted the numbering rather than failing anything.
+while read -r cname ctype cb64; do
+    test -n "$cname" && test "$ctype" = "ssh-ed25519" && test -n "$cb64" ||
+        die "contacts printed a line known_signers could not carry: $cname $ctype $cb64"
+done <"$OUT"
+ok "contacts prints pasteable known_signers lines, commentary on stderr"
+
+# A line the parser cannot use is reported, never silently dropped: a
+# name that vanished from the listing is a name whose refusal turns up
+# later, at a send, with nothing to connect it to.
+printf 'rsaguy ssh-rsa AAAA\n' >>"$KS"
+bx namedid contacts || die "contacts with an unusable line"
+grep -q "rsaguy" "$OUT" && die "an unusable line was printed as pasteable: $(cat "$OUT")"
+grep -q "is not usable (key type ssh-rsa)" "$ERR" || die "unusable line not reported: $(cat "$ERR")"
+ok "contacts reports a line it cannot use instead of dropping it"
+grep -v '^rsaguy ' "$KS" >"$KS.un" && mv "$KS.un" "$KS"
 
 # init never reads BEB_IDENTITY, so a pin cannot send it anywhere and
 # there is no missing-directory case left to refuse: the target is the
 # working directory, which exists by definition of being in it.
 mkdir -p "$W/argtest/sub"
-(cd "$W/argtest" && BEB_IDENTITY=nowhere "$BEB" init) >"$OUT" 2>"$ERR" ||
+(cd "$W/argtest" && BEB_IDENTITY=nowhere "$BEB" init argtest) >"$OUT" 2>"$ERR" ||
     die "init refused because of a pin it should not read: $(cat "$ERR")"
 test -f "$W/argtest/.beb/id_ed25519" || die "init did not write to the working directory"
 test -e "$W/nowhere" && die "init created the directory the pin named"
 ok "a pin pointing anywhere at all cannot move or block init"
 
-# The refusal it prints for a stray argument runs as printed.
-PATH="$(dirname "$BEB"):$PATH" sh -c "cd '$W/argtest' && (cd sub && beb init)" >/dev/null 2>&1 ||
-    die "the printed (cd sub && beb init) form did not work"
+# The form that refusal prints works once NAME is filled in, which is
+# the one word beb cannot supply.
+PATH="$(dirname "$BEB"):$PATH" sh -c "cd '$W/argtest' && (cd sub && beb init subid)" >/dev/null 2>&1 ||
+    die "the printed (cd sub && beb init NAME) form did not work"
 test -f "$W/argtest/sub/.beb/id_ed25519" || die "the printed form made no identity where it said"
-ok "the form init prints in that refusal works verbatim"
+ok "the form init prints in that refusal works with a name filled in"
 
 (cd "$W/argtest" && "$BEB" init --force) >"$OUT" 2>"$ERR" && die "init accepted an option"
 grep -q 'there is no option "--force"' "$ERR" || die "init option refusal: $(cat "$ERR")"
@@ -245,7 +319,7 @@ ok "whoami names the pin that answered, on stderr"
 # question the help line could not answer without growing: must the
 # directory the pin names already exist? It cannot be asked now.
 mkdir -p "$W/pinned" "$W/elsewhere"
-(cd "$W/elsewhere" && BEB_IDENTITY="$W/pinned" "$BEB" init) >"$OUT" 2>"$ERR" ||
+(cd "$W/elsewhere" && BEB_IDENTITY="$W/pinned" "$BEB" init elsewhere) >"$OUT" 2>"$ERR" ||
     die "init under a pin failed: $(cat "$ERR")"
 test -f "$W/elsewhere/.beb/id_ed25519" || die "init did not write to the working directory"
 test -e "$W/pinned/.beb" && die "init wrote to the directory the pin named"
@@ -268,7 +342,7 @@ ok "an identity answers from any working directory once the pin names it"
 # A refusal must leave nothing. Generating a keypair and then failing
 # leaves a private key behind and a directory that answers "already an
 # identity" to the retry.
-(cd "$W/elsewhere" && "$BEB" init) >"$OUT" 2>"$ERR" &&
+(cd "$W/elsewhere" && "$BEB" init elsewhere) >"$OUT" 2>"$ERR" &&
     die "init succeeded onto an existing identity"
 grep -q "already an identity" "$ERR" || die "existing-identity refusal: $(cat "$ERR")"
 ok "a second init on the same directory refuses"
@@ -276,14 +350,14 @@ ok "a second init on the same directory refuses"
 # Unpinned, the export is the whole point: nothing else will use what
 # was just made until the variable names it.
 mkdir -p "$W/seam"
-(cd "$W/seam" && "$BEB" init) >"$OUT" 2>"$ERR" || die "init seam: $(cat "$ERR")"
+(cd "$W/seam" && "$BEB" init seam) >"$OUT" 2>"$ERR" || die "init seam: $(cat "$ERR")"
 grep -q "every other verb needs BEB_IDENTITY set: export BEB_IDENTITY=\$PWD" "$ERR" ||
     die "unpinned init does not name the export: $(cat "$ERR")"
 ok "an unpinned init names the export that makes what it just built usable"
 
 # Pinned at the directory being initialised, the export would be noise.
 mkdir -p "$W/seam2"
-(cd "$W/seam2" && BEB_IDENTITY="$W/seam2" "$BEB" init) >"$OUT" 2>"$ERR" ||
+(cd "$W/seam2" && BEB_IDENTITY="$W/seam2" "$BEB" init seam2) >"$OUT" 2>"$ERR" ||
     die "init pinned at itself failed: $(cat "$ERR")"
 grep -q "BEB_IDENTITY already points here" "$ERR" ||
     die "init did not notice the pin already named it: $(cat "$ERR")"
@@ -384,7 +458,7 @@ ok "no short form appears anywhere in the help"
 "$BEB" --help >"$OUT" 2>/dev/null
 awk 'length($0) > 78 { print; found=1 } END { exit found }' "$OUT" ||
     die "a help line runs past 78 columns"
-test "$(grep -c '^  beb ' "$OUT")" = 11 || die "the help does not list 11 entries"
+test "$(grep -c '^  beb ' "$OUT")" = 12 || die "the help does not list 12 entries"
 # Every signature is followed by exactly one indented description.
 awk '/^  beb /{ want=1; next } want { if ($0 !~ /^      [^ ]/) { print NR": "$0; bad=1 } want=0 } END { exit bad }' "$OUT" ||
     die "a signature is not followed by an indented description"
@@ -440,7 +514,7 @@ rm -f "$MB_C/messages/$LAST" "$MB_C/signatures/$LAST"
 
 # A date beb did not write is refused at the grammar, so a delivery
 # cannot carry a shape beb would then have to interpret.
-mkdir -p "$W/dt" && (cd "$W/dt" && "$BEB" init) >"$HOME/dt.out" 2>/dev/null || die "init dt"
+mkdir -p "$W/dt" && (cd "$W/dt" && "$BEB" init dt) >"$HOME/dt.out" 2>/dev/null || die "init dt"
 DT=$(cat "$HOME/dt.out")
 for bad in "2026-08-15 02:26:34Z" "2026-08-15T02:26:34+00:00" "2026-02-30T00:00:00Z" "not-a-date"; do
     ENV2=$HOME/baddate
@@ -475,7 +549,7 @@ ok "an empty body is accepted and said out loud"
 # mailbox claimed here cannot read what was just written for them, and
 # the cursor init writes is the only thing that tells the cases apart.
 mkdir -p "$W/stranger"
-(cd "$W/stranger" && "$BEB" init) >"$HOME/s.out" 2>/dev/null || die "init stranger"
+(cd "$W/stranger" && "$BEB" init stranger) >"$HOME/s.out" 2>/dev/null || die "init stranger"
 S=$(cat "$HOME/s.out")
 rm -rf "$SPOOL/$(printf '%s' "$S" | sha)"
 bx b send "$S" --subject "into the void" --body "body for a stranger" || die "send to unclaimed"
@@ -535,7 +609,8 @@ ok "list shows id, subject, sender in id order, subjects padded to a column"
 # output". `read` keeps the whole key, because that is where a reply
 # gets composed -- and the short form is a substring of the long one, so
 # a reader can tell the row and the message name one party.
-mkdir -p "$W/hk" && (cd "$W/hk" && "$BEB" init) >"$HOME/hk.out" 2>/dev/null || die "init hk"
+mkdir -p "$W/hk" && (cd "$W/hk" && "$BEB" init hk) >"$HOME/hk.out" 2>/dev/null || die "init hk"
+unname hk
 HK=$(cat "$HOME/hk.out")
 mkid hr >/dev/null || die "init hr"
 HR=$(addr hr)
@@ -595,7 +670,7 @@ ok "consume prints exact body, no trailer"
 # disk. Only the cursor moves, and now the receipt says so.
 #
 # On its own mailbox, so the receipts do not disturb a's sequence.
-mkdir -p "$W/look" && (cd "$W/look" && "$BEB" init) >"$HOME/look.out" 2>/dev/null || die "init look"
+mkdir -p "$W/look" && (cd "$W/look" && "$BEB" init look) >"$HOME/look.out" 2>/dev/null || die "init look"
 LOOK=$(cat "$HOME/look.out")
 bx a send "$LOOK" --subject "first look" --body "a body" || die "send to look"
 bx a send "$LOOK" --subject "second look" --body "another" || die "send to look again"
@@ -618,7 +693,8 @@ ok "peek says the cursor stays, it does, and a read message is still readable"
 # on. It sat in `init` until 0.6.0 -- the one moment nobody has a
 # correspondent to name -- while the moment a reader was staring at 68
 # characters of somebody's base64 said nothing at all.
-mkdir -p "$W/nn" && (cd "$W/nn" && "$BEB" init) >"$HOME/nn.out" 2>/dev/null || die "init nn"
+mkdir -p "$W/nn" && (cd "$W/nn" && "$BEB" init nn) >"$HOME/nn.out" 2>/dev/null || die "init nn"
+unname nn
 NN=$(cat "$HOME/nn.out")
 mkid nr >/dev/null || die "init nr"
 NR=$(addr nr)
@@ -639,7 +715,8 @@ ok "naming the sender stops the hint: it is self-limiting"
 # Once per sender, not once per message. An agent draining five messages
 # from one unnamed sender got the same two lines five times and called
 # them noise, interleaved with the bodies.
-mkdir -p "$W/bulk" && (cd "$W/bulk" && "$BEB" init) >"$HOME/bulk.out" 2>/dev/null || die "init bulk"
+mkdir -p "$W/bulk" && (cd "$W/bulk" && "$BEB" init bulk) >"$HOME/bulk.out" 2>/dev/null || die "init bulk"
+unname bulk
 BULK=$(cat "$HOME/bulk.out")
 mkid drain >/dev/null || die "init drain"
 DR=$(addr drain)
@@ -658,7 +735,7 @@ ok "the roster hint fires once per sender, not once per message"
 # runs into its last byte. stdout cannot carry the fix -- what is printed
 # there has to be the signed bytes and nothing else -- so the separator
 # goes to stderr.
-mkdir -p "$W/nl2" && (cd "$W/nl2" && "$BEB" init) >"$HOME/nl2.out" 2>/dev/null || die "init nl2"
+mkdir -p "$W/nl2" && (cd "$W/nl2" && "$BEB" init nl2) >"$HOME/nl2.out" 2>/dev/null || die "init nl2"
 NL2=$(cat "$HOME/nl2.out")
 printf 'no trailing newline' | bx a send "$NL2" --subject "raw" || die "send raw"
 pin nl2 read >"$OUT" 2>"$ERR" || die "read raw"
@@ -702,7 +779,7 @@ ok "the receipt reads the stored UTC instant out on the local clock, no zone and
 # line -- which would break the one property that makes merging safe.
 # The earlier un-merge test used init, whose stdout is a whole line, so
 # it could not have caught this.
-mkdir -p "$W/nl" && (cd "$W/nl" && "$BEB" init) >"$HOME/nl.out" 2>/dev/null || die "init nl"
+mkdir -p "$W/nl" && (cd "$W/nl" && "$BEB" init nl) >"$HOME/nl.out" 2>/dev/null || die "init nl"
 NL=$(cat "$HOME/nl.out")
 printf 'no trailing newline' | bx a send "$NL" --subject "raw" || die "send raw body"
 pin nl read 2>&1 | grep -v '^beb:' >"$OUT"
@@ -803,7 +880,7 @@ ok "a merged list leads with the header, so truncation cannot eat it"
 # consumes in: a listing of the newest would show a tail while `read`
 # handed over the head, and the row acted on would not be one that was
 # seen.
-mkdir -p "$W/pg" && (cd "$W/pg" && "$BEB" init) >"$HOME/pg.out" 2>/dev/null || die "init pg"
+mkdir -p "$W/pg" && (cd "$W/pg" && "$BEB" init pg) >"$HOME/pg.out" 2>/dev/null || die "init pg"
 PG=$(cat "$HOME/pg.out")
 for i in $(seq 1 14); do bx a send "$PG" --subject "m$i" --body b || die "send m$i"; done
 env BEB_IDENTITY="$W/pg" "$BEB" read >/dev/null 2>&1 || die "read one"
@@ -936,8 +1013,6 @@ mkid d >/dev/null || die "init d"
 D=$(addr d)
 mkid e >/dev/null || die "init e"
 E=$(addr e)
-echo "d $D" >>"$KS"
-echo "e $E" >>"$KS"
 
 bx d send e --subject "for e" --body "for e only" || die "send d->e"
 MB_D=$(mbox d)
@@ -1155,7 +1230,7 @@ ok "an empty BEB_IDENTITY is unset, never a fallback to cwd"
 # delivery for the key was refused with "its owner claims one with: beb
 # init" -- which init answered with "rm -r .beb", i.e. delete your
 # private key. The only followable instruction destroyed the identity.
-mkdir -p "$W/csrc" && (cd "$W/csrc" && "$BEB" init) >"$HOME/cs.out" 2>/dev/null || die "init csrc"
+mkdir -p "$W/csrc" && (cd "$W/csrc" && "$BEB" init csrc) >"$HOME/cs.out" 2>/dev/null || die "init csrc"
 CS=$(cat "$HOME/cs.out")
 CS_MB="$SPOOL/$(printf '%s' "$CS" | sha)"
 mkdir -p "$W/carried" && cp -R "$W/csrc/.beb" "$W/carried/.beb"
@@ -1181,7 +1256,7 @@ test -e "$CS_MB/cursor" && die "a reading verb claimed the mailbox"
 bx a send "$CS" --subject "predates" --body "predates the claim" || die "send to an unclaimed key failed"
 test -e "$CS_MB/cursor" && die "send claimed a mailbox for an absent owner"
 
-(cd "$W/carried" && "$BEB" init) >"$OUT" 2>"$ERR" ||
+(cd "$W/carried" && "$BEB" init carried) >"$OUT" 2>"$ERR" ||
     die "init refused to claim a mailbox for a .beb it did not create: $(cat "$ERR")"
 grep -q '^beb: claimed mailbox .* for the .beb already here, cursor at 0$' "$ERR" ||
     die "adoption ack: $(cat "$ERR")"
@@ -1199,7 +1274,7 @@ printf 'predates the claim' | diff - "$OUT" >/dev/null || die "adopted mail did 
 ok "mail that predated the claim reads after it"
 MBOX_COUNT=$(ls "$SPOOL" | wc -l | tr -d ' ')
 
-(cd "$W/carried" && "$BEB" init) >"$OUT" 2>"$ERR" && die "second init on a claimed mailbox succeeded"
+(cd "$W/carried" && "$BEB" init carried) >"$OUT" 2>"$ERR" && die "second init on a claimed mailbox succeeded"
 grep -q 'already an identity here, and its mailbox is claimed' "$ERR" || die "reclaim refusal: $(cat "$ERR")"
 ok "a claimed mailbox refuses init again"
 
@@ -1208,7 +1283,7 @@ ok "a claimed mailbox refuses init again"
 # -- one key is one mailbox, and that mailbox is already claimed -- so
 # adoption can never mint a second mailbox for a key that has one.
 mkdir -p "$W/sidecopy" && cp -R "$W/csrc/.beb" "$W/sidecopy/.beb"
-(cd "$W/sidecopy" && "$BEB" init) >"$OUT" 2>"$ERR" &&
+(cd "$W/sidecopy" && "$BEB" init sidecopy) >"$OUT" 2>"$ERR" &&
     die "init adopted a copy whose mailbox is already claimed"
 grep -q 'already an identity here, and its mailbox is claimed' "$ERR" ||
     die "side-copy refusal: $(cat "$ERR")"
@@ -1218,7 +1293,7 @@ ok "a .beb beside its original is refused: one key is one mailbox"
 
 # A spool this key has never been claimed in adopts it, wherever the
 # .beb has been. Provenance is not the test and cannot be.
-env XDG_DATA_HOME="$HOME/spool2" sh -c "cd '$W/csrc' && '$BEB' init" >"$OUT" 2>"$ERR" ||
+env XDG_DATA_HOME="$HOME/spool2" sh -c "cd '$W/csrc' && '$BEB' init csrc" >"$OUT" 2>"$ERR" ||
     die "init did not claim in a second spool: $(cat "$ERR")"
 grep -q '^beb: claimed mailbox .* cursor at 0$' "$ERR" || die "second-spool ack: $(cat "$ERR")"
 test "$(ls "$HOME/spool2/beb" | wc -l | tr -d ' ')" = 1 || die "second spool has no mailbox"
@@ -1228,7 +1303,7 @@ ok "the same key claims in a spool that has never seen it"
 # the test until 0.5.3, and a local send to a key that lives elsewhere
 # creates that directory: one outbound message to a stranger opened this
 # machine to unbounded inbound deliveries addressed to them.
-mkdir -p "$W/ek" && (cd "$W/ek" && "$BEB" init) >"$HOME/ek.out" 2>/dev/null || die "init ek"
+mkdir -p "$W/ek" && (cd "$W/ek" && "$BEB" init ek) >"$HOME/ek.out" 2>/dev/null || die "init ek"
 EK=$(cat "$HOME/ek.out")
 EK_MB="$SPOOL/$(printf '%s' "$EK" | sha)"
 env BEB_IDENTITY="$W/ek" "$BEB" pack "$EK" --subject "from outside" --body "body" >"$HOME/stranger2.mbeb" 2>/dev/null
@@ -1256,10 +1331,12 @@ code 1 "unknown verb"              "$BEB" frobnicate
 code 1 "bare read argument"        env BEB_IDENTITY="$W/a" "$BEB" read 4
 code 1 "no pin"                    env -u BEB_IDENTITY "$BEB" whoami
 code 1 "pin without .beb"          env BEB_IDENTITY="$W/nobody" "$BEB" whoami
-code 1 "init with an argument"     env -u BEB_IDENTITY "$BEB" init sub
+code 1 "init with no name"         env -u BEB_IDENTITY "$BEB" init
+code 1 "init with a path-shaped name" env -u BEB_IDENTITY "$BEB" init sub/
 code 1 "unknown roster name"       env BEB_IDENTITY="$W/a" "$BEB" send nosuch --subject t --body hi
 code 2 "wait timeout"              env BEB_IDENTITY="$W/a" "$BEB" wait --timeout 1
-code 3 "already an identity"       sh -c "cd '$W/a' && '$BEB' init"
+code 3 "already an identity"       sh -c "cd '$W/a' && '$BEB' init a"
+code 3 "a name already taken"      sh -c "cd '$W/nobody' && '$BEB' init b"
 ok "exit codes: 0 did it, 1 fix the command, 2 nothing to do, 3 refused"
 
 # 3 must never collapse into 2. This is the pair the table exists for:
@@ -1371,8 +1448,8 @@ ok "the address decides the mailbox, never the directory receive runs in"
 # A mailbox that does not exist here is not conjured by mail arriving:
 # residence is having run beb init, and a stranger is refused.
 ssh-keygen -q -t ed25519 -N "" -C stranger -f "$HOME/stranger" </dev/null || die "keygen stranger"
-echo "stranger $(awk '{print $1" "$2}' "$HOME/stranger.pub")" >>"$KS"
-(pin m1 pack stranger --subject "nobody home" --body "nobody home") >"$HOME/stranger.mbeb" || die "pack stranger"
+echo "outsider $(awk '{print $1" "$2}' "$HOME/stranger.pub")" >>"$KS"
+(pin m1 pack outsider --subject "nobody home" --body "nobody home") >"$HOME/stranger.mbeb" || die "pack outsider"
 (pin m2 receive <"$HOME/stranger.mbeb") >"$OUT" 2>"$ERR" && die "delivery for a stranger accepted"
 grep -q "no mailbox here" "$ERR" || die "stranger refusal text: $(cat "$ERR")"
 grep -q "beb init" "$ERR" || die "stranger refusal names the fix: $(cat "$ERR")"
@@ -1495,7 +1572,7 @@ ok "20 concurrent receives: one install, dedup atomic with insertion"
 mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 
 mkdir -p "$W/perm"
-(umask 000 && cd "$W/perm" && "$BEB" init) >"$OUT" 2>"$ERR" || die "init under umask 000: $(cat "$ERR")"
+(umask 000 && cd "$W/perm" && "$BEB" init perm) >"$OUT" 2>"$ERR" || die "init under umask 000: $(cat "$ERR")"
 PERM=$(addr perm)
 PB=$(mbox perm)
 (umask 000 && pin rs send "$PERM" --subject "perms" --body "private by construction") >/dev/null 2>"$ERR" ||

@@ -27,6 +27,60 @@ pub fn load(path: &Path) -> Vec<Line> {
     }
 }
 
+/// What beb may write as a principal. The parser above is deliberately
+/// lenient about what it reads -- a line it cannot use is refused by
+/// name rather than misparsed -- but a line beb appends has to read back
+/// as exactly one usable name, so this is strict where the parser is
+/// not. Whitespace would make the name two fields, `#` would make the
+/// line a comment, `=` reads as an option, `,` and the wildcards are
+/// refused by name the moment they are used, and a control character
+/// could rewrite a terminal displaying the file.
+pub fn validate_name(name: &str) -> Result<(), String> {
+    let bad = |why: &str| Err(format!("\"{name}\" cannot name an identity: {why}"));
+    if name.is_empty() {
+        return bad("it is empty");
+    }
+    if name.chars().count() > NAME_MAX {
+        return bad(&format!("names are at most {NAME_MAX} characters"));
+    }
+    if name.chars().any(char::is_whitespace) {
+        return bad("a name is one word");
+    }
+    if name.starts_with('#') {
+        return bad("a line starting with # is a comment");
+    }
+    if let Some(c) = name.chars().find(|c| "*?,=".contains(*c)) {
+        return bad(&format!("\"{c}\" is not allowed in a name"));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return bad("it holds a control character");
+    }
+    Ok(())
+}
+
+pub const NAME_MAX: usize = 64;
+
+/// Append one `name key` line, creating the file if it is not there.
+///
+/// The newline is checked, not assumed: a roster whose last line was
+/// written by a person may have no trailing newline, and appending to
+/// that would join two names into one unusable line -- corrupting the
+/// entry already there, which is worse than failing to add one.
+pub fn append(path: &Path, name: &str, canonical: &str) -> Result<(), String> {
+    validate_name(name)?;
+    if let Some(d) = path.parent() {
+        fs::create_dir_all(d)
+            .map_err(|e| format!("cannot create {}: {e}", crate::util::pretty_path(d)))?;
+    }
+    let mut text = fs::read_to_string(path).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!("{name} {canonical}\n"));
+    crate::util::write_atomic(path, text.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", crate::util::pretty_path(path)))
+}
+
 /// Lenient parse: every non-comment line becomes a Line, carrying either a
 /// usable key or the issue that will be refused when the name is used.
 /// Bad lines never poison the rest of the file.
@@ -125,6 +179,41 @@ pub fn reverse<'a>(lines: &'a [Line], canonical: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_beb_may_write_are_stricter_than_names_it_reads() {
+        for good in ["backend", "dev@desk", "a-b_c.1", "root@pve"] {
+            assert!(validate_name(good).is_ok(), "{good}");
+        }
+        for bad in ["", "two words", "#comment", "a,b", "a*b", "a?b", "k=v", "a\tb"] {
+            assert!(validate_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_name(&"x".repeat(NAME_MAX)).is_ok());
+        assert!(validate_name(&"x".repeat(NAME_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn what_append_writes_parses_back_as_one_usable_name() {
+        let line = format!("mine {}\n", "ssh-ed25519 AAAA");
+        let parsed = parse(&line);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "mine");
+    }
+
+    #[test]
+    fn a_roster_without_a_trailing_newline_is_not_joined() {
+        let dir = std::env::temp_dir().join(format!("beb-roster-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("known_signers");
+        fs::write(&path, "first ssh-ed25519 AAAA").unwrap();
+        append(&path, "second", "ssh-ed25519 BBBB").unwrap();
+        let lines = load(&path);
+        assert_eq!(lines.len(), 2, "{:?}", fs::read_to_string(&path));
+        assert_eq!(lines[0].name, "first");
+        assert_eq!(lines[1].name, "second");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
 
     const K1: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFv7BidWkQPvjU9Qz+J3BWNuFmqssCIorRaHYge3gKOQ";
     const K2: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKOBoNSMpcu5CaPKvBT4dO4cH+sHV1Pw0LfkEY1yHOHi";

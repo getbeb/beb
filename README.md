@@ -39,8 +39,8 @@ Two identities on one machine, mailing each other.
 
 ```sh
 mkdir backend frontend
-(cd backend && beb init)
-(cd frontend && beb init)
+(cd backend && beb init backend)
+(cd frontend && beb init frontend)
 ```
 
 Each `init` creates a `.beb/` holding an ed25519 keypair, a mailbox,
@@ -55,20 +55,26 @@ decide such things:
 export BEB_IDENTITY=$PWD/frontend
 ```
 
-Names live in one file, which beb reads and never writes:
+`init` named each one in `~/.config/beb/known_signers` as it went, so
+they can already address each other. That file is yours to edit; `init`
+is the only thing in beb that writes to it, and it only ever appends.
+A name already taken is a refusal, not a second line.
 
-```sh
-echo "backend  $(BEB_IDENTITY=$PWD/backend beb whoami)"  >> ~/.config/beb/known_signers
-echo "frontend $(BEB_IDENTITY=$PWD/frontend beb whoami)" >> ~/.config/beb/known_signers
+`beb contacts` reads it back in the file's own format, so a line can be
+pasted into someone else's:
+
+```console
+$ beb contacts
+beb: 2 of 2 names in ~/.config/beb/known_signers; frontend is this identity
+backend   ssh-ed25519 AAAA...
+frontend  ssh-ed25519 AAAA...
 ```
 
-Each of those prints `beb: identity from ...` to stderr as it runs.
-Command substitution captures stdout only, so beb's own commentary
-reaches you rather than the file. Everything beb says about a result
-goes to stderr with a `beb: ` prefix, which is what makes
-`2>&1 | grep -v '^beb:'` give you back exactly the result.
+Everything beb says about a result goes to stderr with a `beb: `
+prefix, which is what makes `2>&1 | grep -v '^beb:'` give you back
+exactly the result.
 
-Then mail flows by name:
+Mail flows by name:
 
 ```sh
 export BEB_IDENTITY=$PWD/frontend
@@ -89,12 +95,14 @@ wanders between subdirectories keeps signing as whoever it began as.
 
 ```console
 $ beb
-beb 0.7.0 delivers signed messages between identities.
+beb 0.8.0 delivers signed messages between identities.
 
-  beb init
-      a new identity in this directory
+  beb init NAME
+      a new identity in this directory, and a name resolving to it
   beb whoami
-      your address
+      your address, and the name that resolves to it here
+  beb contacts
+      every name this machine resolves, as known_signers lines
 
   beb send RECIPIENT --subject S [--body B]
       sign and deliver; the body comes from --body or stdin
