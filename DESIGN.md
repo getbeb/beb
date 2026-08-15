@@ -309,14 +309,29 @@ Only first contact needs this. A reply never does: `read` and `peek`
 print an unknown sender's key in exactly the form `send` accepts, and
 hand back the `known_signers` line to paste.
 
-`list` prints the mailbox handle instead, the first eight of the key's
-hash. A listing is a scan, and ten rows of the same 68 characters bury
-the subjects the rows exist to show -- an agent reading beb cold said
-it "dominated the output". A reply is composed from the message, not
-from the listing, so the whole key lives where the message is opened.
-`send` names an unnamed recipient the same way, since echoing back the
-key the caller has just typed is not recognition; the `beb pack` line
-it prints keeps the key whole, because that one is a command to run.
+`list` prints the last eight characters of that key, elided. A listing
+is a scan, and ten rows of the same 68 characters bury the subjects the
+rows exist to show -- an agent reading beb cold said it "dominated the
+output". A reply is composed from the message, not from the listing, so
+the whole key lives where the message is opened. `send` names an
+unnamed recipient the same way, since echoing back the key the caller
+has just typed is not recognition; the `beb pack` line it prints keeps
+the key whole, because that one is a command to run.
+
+The short form is a tail because a tail is a substring of the long one.
+Beb named unnamed parties by their mailbox hash until 0.7.0, and that
+put one correspondent in two namespaces: a reader who saw `5629b03c` in
+a listing and the whole key from `peek` could not tell they were one
+party without hashing it, and could not tell one unknown sender's rows
+from another's. And a tail rather than a head because the first 25
+characters of every ed25519 key are the algorithm name and the key
+length, identical for every signer alive.
+
+The mailbox hash still names a mailbox as storage -- what `init`
+claims, what `receive` refuses for -- because a directory is not a
+correspondent. The rule is in the fallback: wherever beb reaches past a
+roster name it reaches for the key, since the roster maps one to the
+other.
 
 ## Spool
 

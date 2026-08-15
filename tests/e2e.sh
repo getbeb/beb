@@ -529,11 +529,12 @@ printf '1  now  endpoint ready  b\n2  now  schema          b\n3  now  deploy win
     diff - "$OUT" >/dev/null || die "list content: $(cat "$OUT")"
 ok "list shows id, subject, sender in id order, subjects padded to a column"
 
-# A listing names an unnamed sender by its mailbox handle, not by 68
+# A listing names an unnamed sender by the tail of its key, not by 68
 # characters of base64. Ten rows of the same key buried the subjects the
 # rows exist to show; an agent reading beb cold said it "dominated the
 # output". `read` keeps the whole key, because that is where a reply
-# gets composed.
+# gets composed -- and the short form is a substring of the long one, so
+# a reader can tell the row and the message name one party.
 mkdir -p "$W/hk" && (cd "$W/hk" && "$BEB" init) >"$HOME/hk.out" 2>/dev/null || die "init hk"
 HK=$(cat "$HOME/hk.out")
 mkid hr >/dev/null || die "init hr"
@@ -541,18 +542,19 @@ HR=$(addr hr)
 pin hk send "$HR" --subject "unnamed sender" --body x >/dev/null 2>&1 || die "send from hk"
 bx hr list || die "list with an unnamed sender"
 grep -q 'ssh-ed25519' "$OUT" && die "a listing printed a raw key: $(cat "$OUT")"
-grep -qE '  [0-9a-f]{8}$' "$OUT" || die "no mailbox handle in the row: $(cat "$OUT")"
-ok "a listing names an unnamed sender by its handle, so subjects stay visible"
+grep -qE '  \.\.\.[A-Za-z0-9+/]{8}$' "$OUT" || die "no elided key in the row: $(cat "$OUT")"
+grep -q "\.\.\.${HK: -8}$" "$OUT" || die "the row's tail is not that sender's key: $(cat "$OUT")"
+ok "a listing names an unnamed sender by the tail of the key read prints whole"
 
 bx hr read || die "read from an unnamed sender"
 grep -q "$HK" "$ERR" || die "read did not carry the whole key: $(cat "$ERR")"
 ok "read carries the whole key, where a reply gets composed"
 
-# send names the recipient the caller just typed by its handle too, but
-# the beb pack line it prints is a command and keeps the key.
+# send names the recipient the caller just typed the same way, but the
+# beb pack line it prints is a command and keeps the key.
 bx hk send "$HR" --subject "second" --body x || die "second send"
 grep -q 'ssh-ed25519' "$ERR" && die "the send ack echoed the key back at the caller: $(cat "$ERR")"
-ok "send names an unnamed recipient by handle rather than echoing the key"
+ok "send names an unnamed recipient by key tail rather than echoing the key"
 
 bx b send nosuch --subject t --body hi && die "unknown name accepted"
 grep -q 'no "nosuch"' "$ERR" || die "unknown name refusal"

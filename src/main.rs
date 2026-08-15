@@ -673,13 +673,13 @@ fn cmd_send(args: &[String]) -> Result<(), Fail> {
     // Your own key needs no name to be recognizable, and printing 68
     // characters of base64 back at the sender is not recognition. Nor is
     // printing the key they just typed: an unnamed recipient is named by
-    // its mailbox handle in the sentence, while the `beb pack` line below
+    // its key's tail in the sentence, while the `beb pack` line below
     // keeps the whole key, because that one is a command to run.
     let full = display.clone();
     let display = if to.canonical() == me.key.canonical() {
         "you".to_string()
     } else if roster::reverse(&lines, &to.canonical()).is_none() {
-        handle(&to.canonical())
+        short_key(&to.canonical())
     } else {
         display
     };
@@ -858,12 +858,13 @@ fn cmd_receive(args: &[String]) -> Result<(), Fail> {
     let name = |k: &str| -> String {
         roster::reverse(&lines, k)
             .map(str::to_string)
-            .unwrap_or_else(|| util::sha256_hex(k)[..8].to_string())
+            .unwrap_or_else(|| short_key(k))
     };
     let from = {
         let c = h.from.canonical();
-        // The sender keeps its full key when it has no name: a reply
-        // needs bytes `send` accepts, and a mailbox handle is not one.
+        // The sender keeps its full key when it has no name: an operator
+        // reading a transport's log is one `known_signers` line away from
+        // naming it, and a tail is not bytes `send` accepts.
         roster::reverse(&lines, &c).map(str::to_string).unwrap_or(c)
     };
     match delivered {
@@ -1191,7 +1192,7 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
                 let c = h.from.canonical();
                 let sender = roster::reverse(&lines, &c)
                     .map(str::to_string)
-                    .unwrap_or_else(|| handle(&c));
+                    .unwrap_or_else(|| short_key(&c));
                 let when = util::parse_rfc3339(&h.date)
                     .map(|t| age(t, now))
                     .unwrap_or_else(|| "?".into());
@@ -1221,17 +1222,34 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     Ok(())
 }
 
-/// How beb names a key nobody has named: the first eight of its mailbox
-/// hash, which is what `init` prints and what the refusal about an
-/// unclaimed mailbox already uses.
+/// How beb names a key nobody has named: the last eight characters of
+/// its base64, elided. Scanning ten rows of the same 68-character key
+/// buries the subjects the rows exist to show -- an agent reading beb
+/// cold said it "dominated the output" -- while `read` keeps the key
+/// whole, because that is where a reply gets composed.
 ///
-/// A listing uses it and `read` does not, which is a split by what the
-/// verb is for. Scanning ten rows of the same 68-character key buries
-/// the subjects the rows exist to show -- an agent reading beb cold said
-/// it "dominated the output". Looking closely at one message is where a
-/// reply gets composed, so that is where the key stays whole.
-fn handle(canonical: &str) -> String {
-    util::sha256_hex(canonical)[..8].to_string()
+/// A tail, not the mailbox hash this printed until 0.7.0. The hash named
+/// the same correspondent in a second namespace nothing else beb prints
+/// shares: a reader who saw `5629b03c` in a listing and the whole key
+/// from `peek` had no way to tell they were one party without hashing it
+/// themselves, and no way to tell two rows apart from two senders. A
+/// tail is a substring of the string `read`, `peek` and `whoami` all
+/// print, so the eye does the join.
+///
+/// A tail and not a head: the first 25 characters of every ed25519 key
+/// are the algorithm name and the key length, identical for every signer
+/// alive, so a leading elision distinguishes nobody.
+///
+/// The mailbox hash is still how beb names a mailbox as storage -- what
+/// `init` claims, what `receive` refuses for. That is a directory, and a
+/// directory is not a correspondent. The rule is the fallback: wherever
+/// beb reaches past a roster name, it reaches for the key, because the
+/// roster maps one to the other.
+fn short_key(canonical: &str) -> String {
+    match canonical.rsplit(' ').next() {
+        Some(b64) if b64.len() > 8 => format!("...{}", &b64[b64.len() - 8..]),
+        _ => canonical.to_string(),
+    }
 }
 
 /// Who a message is from and what it says it is about, in the words the
