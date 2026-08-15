@@ -89,7 +89,7 @@ wanders between subdirectories keeps signing as whoever it began as.
 
 ```console
 $ beb
-beb 0.6.0 delivers signed messages between identities.
+beb 0.7.0 delivers signed messages between identities.
 
   beb init
       a new identity in this directory
@@ -98,8 +98,9 @@ beb 0.6.0 delivers signed messages between identities.
 
   beb send RECIPIENT --subject S [--body B]
       sign and deliver; the body comes from --body or stdin
-  beb list [--from ID] [--limit N]
-      what is waiting, the next 10 by default
+  beb list [--after ID | --before ID] [--limit N]
+      read-only. unread, at most 10 rows, printed oldest first
+      --after/--before exclude ID, take the N nearest it, and reach read mail
   beb read
       the next unread message; moves the cursor past it
   beb peek ID
@@ -116,6 +117,8 @@ beb 0.6.0 delivers signed messages between identities.
       this list
   beb --version
       the version alone
+
+Exit: 0 did it, 1 change the command, 2 nothing to do, 3 refused.
 
 BEB_IDENTITY names the directory holding the .beb to act as. Every verb
 requires it except init, which never reads it and always writes here:

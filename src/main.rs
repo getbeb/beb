@@ -35,8 +35,9 @@ beb {version} delivers signed messages between identities.
 
   beb send RECIPIENT --subject S [--body B]
       sign and deliver; the body comes from --body or stdin
-  beb list [--from ID] [--limit N]
-      what is waiting, the next 10 by default
+  beb list [--after ID | --before ID] [--limit N]
+      read-only. unread, at most 10 rows, printed oldest first
+      --after/--before exclude ID, take the N nearest it, and reach read mail
   beb read
       the next unread message; moves the cursor past it
   beb peek ID
@@ -53,6 +54,8 @@ beb {version} delivers signed messages between identities.
       this list
   beb --version
       the version alone
+
+Exit: 0 did it, 1 change the command, 2 nothing to do, 3 refused.
 
 BEB_IDENTITY names the directory holding the .beb to act as. Every verb
 requires it except init, which never reads it and always writes here:
@@ -668,9 +671,15 @@ fn cmd_send(args: &[String]) -> Result<(), Fail> {
         resolve_recipient(&out.recipient, &lines, &util::pretty_path(&ks_path), "send")?;
 
     // Your own key needs no name to be recognizable, and printing 68
-    // characters of base64 back at the sender is not recognition.
+    // characters of base64 back at the sender is not recognition. Nor is
+    // printing the key they just typed: an unnamed recipient is named by
+    // its mailbox handle in the sentence, while the `beb pack` line below
+    // keeps the whole key, because that one is a command to run.
+    let full = display.clone();
     let display = if to.canonical() == me.key.canonical() {
         "you".to_string()
+    } else if roster::reverse(&lines, &to.canonical()).is_none() {
+        handle(&to.canonical())
     } else {
         display
     };
@@ -723,10 +732,10 @@ fn cmd_send(args: &[String]) -> Result<(), Fail> {
         // and a refusal is a poor thing to be told to type. The roster
         // name is preferred when there is one: shorter, and the reader
         // already chose it.
-        let arg = if display.chars().any(char::is_whitespace) {
-            format!("\"{display}\"")
+        let arg = if full.chars().any(char::is_whitespace) {
+            format!("\"{full}\"")
         } else {
-            display.clone()
+            full.clone()
         };
         note(&format!(
             "accepted for {display}; {body} bytes; nobody here reads it\n\
@@ -1020,31 +1029,34 @@ fn age(claimed: i64, now: i64) -> String {
 const LIST_PAGE: usize = 10;
 
 fn cmd_list(args: &[String]) -> Result<(), Fail> {
-    const FORM: &str = "beb list [--from ID] [--limit N]";
-    let mut from: Option<u64> = None;
+    const FORM: &str = "beb list [--after ID | --before ID] [--limit N]";
+    let mut after: Option<u64> = None;
+    let mut before: Option<u64> = None;
     let mut count: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
-        let val = |slot_named: &str| -> Result<&String, Fail> {
+        let val = |what: &str| -> Result<&String, Fail> {
             args.get(i + 1)
-                .ok_or_else(|| Fail::from(format!("{a} needs {slot_named}: {FORM}")))
+                .ok_or_else(|| Fail::from(format!("{a} needs {what}: {FORM}")))
         };
+        // `--after 0` is legal and `--before 0` is not, which is the whole
+        // difference between a boundary and a message. Ids start at 1, so
+        // "after 0" is the only way to name the start of the mailbox: an
+        // exclusive cursor can name every interior boundary and neither
+        // end, and losing "from the beginning" is what switching from the
+        // inclusive `--from` would otherwise cost.
         match a {
-            // `--all` was a second way to say `--from 1 --limit 0`, and it needed
-            // a rule of its own for what it meant beside a window. The
-            // refusal names the form that replaced it rather than
-            // reporting an unknown option, because a caller typing it
-            // knows exactly what they want.
-            "--all" => {
-                return Err(format!(
-                    "list has no --all; beb list --from 1 --limit 0 shows every message there is"
-                )
-                .into())
-            }
-            "--from" => {
+            "--after" => {
                 let v = val("an id")?;
-                from = Some(
+                after = Some(v.parse::<u64>().map_err(|_| {
+                    Fail::from(format!("not a message id: \"{v}\""))
+                })?);
+                i += 2;
+            }
+            "--before" => {
+                let v = val("an id")?;
+                before = Some(
                     v.parse::<u64>()
                         .ok()
                         .filter(|&n| n > 0)
@@ -1060,6 +1072,25 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
                 );
                 i += 2;
             }
+            // Both were spellings for a window, and both name what
+            // replaced them rather than reporting an unknown option: a
+            // caller typing either knows exactly what they want.
+            "--all" => {
+                return Err(format!(
+                    "list has no --all; beb list --after 0 --limit 0 shows every message there is"
+                )
+                .into())
+            }
+            // `--from` was the inclusive forward-only cursor of 0.6.0. It
+            // could not page backwards at all, and an agent reading the
+            // help cold answered "the exact command cannot be determined"
+            // to both digging questions.
+            "--from" => {
+                return Err(format!(
+                    "list has no --from; --after ID pages forward and --before ID back\n{FORM}"
+                )
+                .into())
+            }
             _ => {
                 return Err(match long_form("list", a) {
                     Some(long) => format!("list has no {a}; the option is {long}: {FORM}"),
@@ -1069,49 +1100,58 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
             }
         }
     }
+    // One boundary or none. Two would name a range, which is a different
+    // verb's worth of meaning than "the N nearest this id".
+    if after.is_some() && before.is_some() {
+        return Err(format!("--after and --before name opposite ends; use one: {FORM}").into());
+    }
+
     let me = identity()?;
     let mb = Mailbox::of(&util::spool_root()?, &me.key.canonical());
     claimed(&mb)?;
     let cursor = mb.cursor();
     let ids = mb.ids();
     let unread = ids.iter().filter(|&&id| id > cursor).count();
-
-    // The window runs forward from the cursor, because that is the
-    // direction `read` moves in: a listing of the newest messages
-    // would show a tail while `read` handed over the head, and the row
-    // an agent acted on would not be one it had seen. `-f` names a
-    // different start, and then already-read messages are in range,
-    // because an explicit id is a request rather than a filter.
-    let start = from.unwrap_or(cursor + 1);
     let limit = match count {
         Some(0) => usize::MAX,
         Some(n) => n,
         None => LIST_PAGE,
     };
-    let shown: Vec<u64> = ids.iter().copied().filter(|&id| id >= start).take(limit).collect();
 
-    // The header states the cursor every time, including over an empty
-    // listing. An absent header is ambiguous between an old build, a
-    // listing that really is empty, and a read that got truncated, while
-    // a stated cursor plus monotonic ids makes read state computable
-    // rather than marked: nothing in the rows needs a flag once the
-    // reader has the number.
+    // Both cursors are exclusive, so a caller pages by handing back an id
+    // it was just shown: the last row to walk forward, the first row to
+    // walk back. Nothing is ever computed, which is what makes gaps
+    // harmless -- arithmetic on ids breaks the moment a carrier prunes.
     //
-    // It goes to stderr, where everything beb says about an artifact
-    // goes, so `beb list | wc -l` counts messages and not prose. It goes
-    // first because a listing has no bound, and a receipt behind an
-    // unbounded artifact is the first thing `head` or a display limit
-    // throws away.
-    // Four facts, the same four every time: where the cursor is, how
-    // much the mailbox holds, how much of it is unread, and how much of
-    // that is on the screen. The last one is what makes a window safe to
-    // print -- a paged listing that did not say it was paged would read
-    // as the whole, and an agent would act on a tenth of its mail
-    // believing it had seen all of it.
-    // "total" rather than "here": everywhere else in beb's output "here"
-    // means this machine -- nobody here reads it, no mailbox claimed
-    // here -- so "25 here" reads as a fact about the host when it is a
-    // fact about the mailbox.
+    // Rows always print oldest first, whichever end they were taken from.
+    // The boundary chooses which rows, never their order, so a listing
+    // reads the same way every time and in the same direction `read`
+    // hands messages over.
+    let shown: Vec<u64> = match before {
+        Some(b) => {
+            let below: Vec<u64> = ids.iter().copied().filter(|&id| id < b).collect();
+            below[below.len().saturating_sub(limit)..].to_vec()
+        }
+        // No boundary is the cursor: unread, which is what `beb list`
+        // has always meant.
+        None => {
+            let mark = after.unwrap_or(cursor);
+            ids.iter().copied().filter(|&id| id > mark).take(limit).collect()
+        }
+    };
+
+    // Four facts, the same four every time: where the cursor is, how much
+    // the mailbox holds, how much of it is unread, and how much of that is
+    // on the screen. The last is what makes a window safe to print -- a
+    // paged listing that did not say it was paged would read as the whole,
+    // and a reader would act on a tenth of its mail believing it had seen
+    // all of it. It also answers "is there more": fewer rows than --limit
+    // is the end of the walk.
+    //
+    // It goes to stderr, where everything beb says about an artifact goes,
+    // so `beb list | wc -l` counts messages and not prose, and first
+    // because a listing has no bound and a receipt behind an unbounded
+    // artifact is the first thing a `head` throws away.
     let header = format!(
         "cursor at {cursor}; {} total, {unread} unread; showing {}",
         ids.len(),
@@ -1124,21 +1164,34 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
         return Err(nothing(header));
     }
     note(&header);
+    // Every other verb names the next step; this one printed a window and
+    // said nothing about how to move it, even though the ids to move it
+    // with were sitting in the rows. An agent paging cold inferred both
+    // boundaries correctly and still reported that "actual output did not
+    // tell me what to do next".
+    //
+    // Only when there is somewhere to go. A listing with nothing above and
+    // nothing below is the whole mailbox, and an offer to page it would be
+    // an offer to see the same rows again.
+    let first = *shown.first().expect("shown is not empty here");
+    let last = *shown.last().expect("shown is not empty here");
+    if ids.iter().any(|&id| id > last) {
+        note(&format!("newer: beb list --after {last}"));
+    }
+    if ids.iter().any(|&id| id < first) {
+        note(&format!("older: beb list --before {first}"));
+    }
 
     let lines = roster::load(&util::known_signers_path()?);
-    // Title before sender, which inverts the usual order for a reason
-    // the usual order does not have to deal with: an unnamed sender
-    // displays as 68 characters of base64, in the form `send` accepts,
-    // and a column of those pushes every subject off the screen. The subject
-    // is capped at 120 bytes, so it is the field that can be a column;
-    // the sender is unbounded, so it goes last where it can run.
     let now = util::now_secs()?;
     let rows: Vec<(u64, String, String, String)> = shown
         .into_iter()
         .map(|id| match envelope::read_headers(&mb.message(id)) {
             Ok(h) => {
                 let c = h.from.canonical();
-                let sender = roster::reverse(&lines, &c).map(str::to_string).unwrap_or(c);
+                let sender = roster::reverse(&lines, &c)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| handle(&c));
                 let when = util::parse_rfc3339(&h.date)
                     .map(|t| age(t, now))
                     .unwrap_or_else(|| "?".into());
@@ -1168,6 +1221,19 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     Ok(())
 }
 
+/// How beb names a key nobody has named: the first eight of its mailbox
+/// hash, which is what `init` prints and what the refusal about an
+/// unclaimed mailbox already uses.
+///
+/// A listing uses it and `read` does not, which is a split by what the
+/// verb is for. Scanning ten rows of the same 68-character key buries
+/// the subjects the rows exist to show -- an agent reading beb cold said
+/// it "dominated the output". Looking closely at one message is where a
+/// reply gets composed, so that is where the key stays whole.
+fn handle(canonical: &str) -> String {
+    util::sha256_hex(canonical)[..8].to_string()
+}
+
 /// Who a message is from and what it says it is about, in the words the
 /// reader already has: the roster name when there is one, and the key in
 /// exactly the form `send` accepts when there is not.
@@ -1183,10 +1249,29 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
 /// appears only while that sender is unnamed and stops the first time
 /// anybody acts on it. The template itself is the one `init` used to
 /// print, pointed at somebody else's key, which was its correct use.
-fn name_hint(h: &Headers) -> Option<String> {
+fn name_hint(mb: &Mailbox, id: u64, h: &Headers) -> Option<String> {
     let lines = util::known_signers_path().ok().map(|p| roster::load(&p))?;
     let c = h.from.canonical();
     if roster::reverse(&lines, &c).is_some() {
+        return None;
+    }
+    // Once per sender, not once per message. Self-limiting only limits a
+    // reader who acts on it, and an agent draining five messages from one
+    // unnamed sender got the same two lines five times and called them
+    // noise. So the hint belongs to the earliest message from that sender
+    // still in the mailbox: anything below this id from the same key means
+    // the offer was already made. The scan stops at the first match, so a
+    // sender that writes often costs one envelope read.
+    if mb
+        .ids()
+        .into_iter()
+        .take_while(|&other| other < id)
+        .any(|other| {
+            envelope::read_headers(&mb.message(other))
+                .map(|prev| prev.from.canonical() == c)
+                .unwrap_or(false)
+        })
+    {
         return None;
     }
     let ks = util::known_signers_path().ok()?;
@@ -1261,7 +1346,7 @@ fn cmd_read(args: &[String]) -> Result<(), Fail> {
             // of intent. Prose is the wrong carrier for "did it work"
             // anyway, which is what the code table is for.
             note(&format!("{}; cursor {cursor} -> {id}", describe(&mb, id, &h)));
-            if let Some(hint) = name_hint(&h) {
+            if let Some(hint) = name_hint(&mb, id, &h) {
                 note(&hint);
             }
             print_body(&mut f, h.body_offset)?;
@@ -1287,7 +1372,7 @@ fn cmd_peek(args: &[String]) -> Result<(), Fail> {
     claimed(&mb)?;
     if !mb.ids().contains(&id) {
         return Err(format!(
-            "no message {id}; beb list --from 1 --limit 0 shows what exists"
+            "no message {id}; beb list --after 0 --limit 0 shows what exists"
         )
         .into());
     }
@@ -1298,7 +1383,7 @@ fn cmd_peek(args: &[String]) -> Result<(), Fail> {
     // which from somewhere else.
     let cursor = mb.cursor();
     note(&format!("{}; cursor stays at {cursor}", describe(&mb, id, &h)));
-    if let Some(hint) = name_hint(&h) {
+    if let Some(hint) = name_hint(&mb, id, &h) {
         note(&hint);
     }
     print_body(&mut f, h.body_offset).map_err(Fail::from)
@@ -1494,11 +1579,32 @@ fn check(mb: &Mailbox, id: u64, me: &Identity) -> Result<(File, Headers), Fail> 
 
 /// The body goes file -> stdout with io::copy; it never lands in memory
 /// whole. The file is the one check() verified.
+///
+/// A body is raw and usually does not end in a newline, so the next
+/// thing written anywhere runs into its last byte: an agent draining a
+/// mailbox saw `Body 01beb: 2 from ...` and called it the worst defect
+/// in the tool. stdout cannot carry the fix, because what is printed
+/// there has to be the bytes that were signed and nothing else -- beb
+/// carries binary bodies. So the line break goes to stderr, where
+/// everything beb adds already goes. It is a separator rather than
+/// speech, which is why it carries no `beb: `.
 fn print_body(f: &mut File, offset: u64) -> Result<(), String> {
+    let end = f.metadata().map_err(|e| format!("cannot stat: {e}"))?.len();
+    let mut last = [0u8; 1];
+    if end > offset {
+        f.seek(SeekFrom::Start(end - 1))
+            .map_err(|e| format!("cannot seek: {e}"))?;
+        f.read_exact(&mut last)
+            .map_err(|e| format!("cannot read body: {e}"))?;
+    }
     f.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("cannot seek: {e}"))?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
     io::copy(f, &mut out).map_err(|e| format!("cannot print body: {e}"))?;
-    out.flush().map_err(|e| format!("cannot print body: {e}"))
+    out.flush().map_err(|e| format!("cannot print body: {e}"))?;
+    if end > offset && last[0] != b'\n' {
+        let _ = writeln!(io::stderr());
+    }
+    Ok(())
 }

@@ -289,11 +289,13 @@ both lines. An unknown name's refusal names the line to add.
 `init` carried that hint until 0.6.0, which is the one moment nobody
 has a correspondent to name: an agent reading beb cold called it
 irrelevant to every task it had, while the moment a reader was staring
-at 68 characters of somebody's base64 said nothing at all. Here it is
-self-limiting, which is what makes repeating it honest -- it appears
-only while that sender is unnamed and stops the first time anybody
-acts on it -- and it carries the key, so the fix is a line to paste
-rather than a rule to go and learn. The template is the one `init` used
+at 68 characters of somebody's base64 said nothing at all. Here it
+carries the key, so the fix is a line to paste rather than a rule to
+go and learn, and it appears once per sender: it belongs to the
+earliest message from that key still in the mailbox, so anything below
+that id means the offer was already made. Self-limiting only limits a
+reader who acts, and an agent draining five messages from one unnamed
+sender got the same two lines five times and called them noise. The template is the one `init` used
 to print, pointed at somebody else's key, which was its correct use.
 
 An address is a public key, so it needs a channel you can
@@ -303,8 +305,18 @@ other machine, the exchange is two one-liners:
     echo "pve $(ssh pve 'BEB_IDENTITY=~/work beb whoami')" >> ~/.config/beb/known_signers
     echo "mac $(beb whoami)" | ssh pve 'cat >> ~/.config/beb/known_signers'
 
-Only first contact needs this. A reply never does: `list` prints an
-unknown sender's key in exactly the form `send` accepts.
+Only first contact needs this. A reply never does: `read` and `peek`
+print an unknown sender's key in exactly the form `send` accepts, and
+hand back the `known_signers` line to paste.
+
+`list` prints the mailbox handle instead, the first eight of the key's
+hash. A listing is a scan, and ten rows of the same 68 characters bury
+the subjects the rows exist to show -- an agent reading beb cold said
+it "dominated the output". A reply is composed from the message, not
+from the listing, so the whole key lives where the message is opened.
+`send` names an unnamed recipient the same way, since echoing back the
+key the caller has just typed is not recognition; the `beb pack` line
+it prints keeps the key whole, because that one is a command to run.
 
 ## Spool
 
@@ -393,14 +405,15 @@ this leans on are kernel guarantees network filesystems do not keep.
 ## Interface
 
     beb init
-        an identity here, or in BEB_IDENTITY; the directory must exist
+        a new identity in this directory
     beb whoami
         your address
 
     beb send RECIPIENT --subject S [--body B]
         sign and deliver; the body comes from --body or stdin
-    beb list [--from ID] [--limit N]
-        what is waiting, the next 10 by default
+    beb list [--after ID | --before ID] [--limit N]
+        read-only. unread, at most 10 rows, printed oldest first
+        --after/--before exclude ID, take the N nearest it, and reach read mail
     beb read
         the next unread message; moves the cursor past it
     beb peek ID
@@ -508,7 +521,7 @@ reading beb cold called the bare mark "worse than useless on its own"
 -- it had to recall a phrase from `--help` to know what the digit was,
 and then could not work out why it read 3 when the message it had just
 been told about was 2. Without it a
-caller went `beb list --from 1 --limit 0 | tail -1 | awk`, parsing a
+caller went `beb list --after 0 --limit 0 | tail -1 | awk`, parsing a
 listing meant for people to recover a number beb already had. It prints
 on a timeout too, because nothing arriving does not make the mark less
 true, and that is what lets a waiter with no history start:
@@ -667,23 +680,43 @@ the header is the whole report rather than a line printed before one.
 
 `list` is paged, because a mailbox is unbounded and an agent's context
 is not: an unpaged listing is a flood waiting for the one morning
-nobody was reading. Ten rows by default, `--limit` for another count, `--limit 0` for no
-limit at all.
+nobody was reading. Ten rows by default, `--limit` for another count,
+`--limit 0` for no limit at all.
 
-The window runs forward from the cursor, which is the direction `read`
-consumes in. A listing of the newest messages would show a tail while
-`read` handed over the head, and the row an agent acted on would not
-be one it had seen. `--from` names a different start, and then
-messages already read are in range, because an explicit id is a
-request rather than a filter.
+With no boundary the window runs forward from the cursor, which is the
+direction `read` consumes in: the first row is the message `read` will
+hand over next. `--after ID` and `--before ID` name a boundary instead,
+and then messages already read are in range, because an explicit id is
+a request rather than a filter.
 
-`--from` takes an id and not an offset, and the difference is not
-cosmetic. An offset names the nth row of whatever the set happens to
-be, and this set changes under the reader: mail arrives while they
-page, and pruning is legal, so the twenty-first row is a different
-message before and after either. An id is the same message forever.
-A reader pages by the last id it saw plus one, and cannot re-read a
-row or step over one.
+Both boundaries are exclusive, and both take an id the caller was just
+shown -- the last row to walk forward, the first row to walk back.
+Nothing is ever computed, which is the point. An offset names the nth
+row of whatever the set happens to be, and the set changes under the
+reader: mail arrives while they page, and pruning is legal. Arithmetic
+on ids fails the same way; asking for the ten before a mark returned
+seven the moment a carrier had pruned three out of the range. An id is
+the same message forever.
+
+`--from ID` was the inclusive forward-only cursor of 0.6.0 and could
+not page backwards at all. An agent given that help cold answered "the
+exact command cannot be determined" to both questions about digging
+through old mail, and named ten ways it might write a wrong command;
+the same agent given `--after`/`--before` answered every question and
+named four, all of them facts about beb rather than gaps in the line.
+
+Rows print oldest first whichever end they were taken from. The
+boundary chooses which rows, never their order, so a listing reads the
+same way every time. That is a deliberate difference from the API this
+shape is borrowed from: Stripe returns newest-first, so its
+`starting_after` walks a reader older, and the identical word here
+walks them newer.
+
+An exclusive cursor can name every interior boundary and neither end.
+Ids start at 1, so `--after 0` is the only way to say "from the start"
+and `beb list --after 0 --limit 0` is the whole mailbox; `--before 0`
+names nothing and refuses. The other end has no id either and needs
+none: `beb wait --timeout 0` prints one past the highest.
 
 The header carries four facts and the same four every time: where the
 cursor is, how much the mailbox holds, how much is unread, and how
@@ -699,6 +732,15 @@ had seen all of it.
 
 A body, a frame, a listing, an address and a mark are artifacts; the
 sentence said about one is not.
+
+stdout carries the signed bytes and nothing added to them, which has a
+cost worth naming: a raw body rarely ends in a newline, so a consumer
+that concatenates one command's stdout with the next command's stderr
+sees them run together. A line break on stderr separates them for
+anything that interleaves the two streams, which is what a shell does,
+and cannot help a consumer that keeps them in separate blocks. The fix
+that would work everywhere is a newline on stdout, and that would mean
+`beb read > file` no longer reproduces what was sent.
 
 `pack` was the last verb to say nothing at all. Its artifact goes to
 stdout and almost always straight into a file, so a reader who
