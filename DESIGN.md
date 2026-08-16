@@ -167,10 +167,10 @@ and must stay exactly that:
     beb: identity from BEB_IDENTITY=~/project/backend, named backend here
 
 The name is said and not printed, and the difference is load-bearing.
-An address is a hash input as well as text -- a mailbox directory is
-sha256 of exactly these bytes -- so a `<name> <address>` line here,
+An address is a path input as well as text -- a mailbox directory is
+named for exactly these bytes -- so a `<name> <address>` line here,
 tempting because that is the shape of the file the address is bound
-for, would silently hash to a mailbox that does not exist. `contacts`
+for, would silently name a mailbox that does not exist. `contacts`
 prints that line; `whoami` prints the thing the line is about.
 
 `init` is the exception, and never reads `BEB_IDENTITY` at all. It
@@ -388,7 +388,7 @@ characters of every ed25519 key are the algorithm name and the key
 length, identical for every signer alive.
 
 The mailbox hash still names a mailbox as storage -- what `init`
-claims, what `receive` refuses for -- because a directory is not a
+claims, what `drop` refuses for -- because a directory is not a
 correspondent. The rule is in the fallback: wherever beb reaches past a
 roster name it reaches for the key, since the roster maps one to the
 other.
@@ -396,47 +396,72 @@ other.
 ## Spool
 
     ~/.local/share/beb/
-    └── 9288c0759597cb39.../     # one mailbox per identity,
-        ├── messages/            # named sha256 of its key text
-        │   ├── 000000000000000001
-        │   └── 000000000000000002
-        ├── signatures/
-        │   ├── 000000000000000001
-        │   └── 000000000000000002
-        └── cursor               # contains: 1
+    ├── d811f21767d40b61.../     # one mailbox per identity,
+    │   ├── msg/                 # named for the key itself
+    │   │   ├── 000000000000000001
+    │   │   └── 000000000000000002
+    │   └── cursor               # contains: 1
+    └── outbox/                  # mail for keys that read elsewhere
+        └── 000000000000000001
 
 Guarantees, for anything that reads:
 
-1. a mailbox directory is the lowercase hex sha256 of the public key
-   text (`<type> <base64>`) it belongs to
-2. a file under `messages/` is named by its delivery id
+1. a mailbox directory is the lowercase hex of the 32 raw ed25519 key
+   bytes it belongs to -- the key itself, not a hash of its text, so
+   the name is derivable without hashing and reverses back to the key
+2. a file under `msg/` is named by its delivery id, and is one whole
+   frame: header, envelope, signature
 3. a visible file is whole
 4. a visible file never changes
-5. a visible message's signature is already beside it in `signatures/`
-6. a mailbox has a `cursor` if and only if its owner claimed it here
-   with `beb init`; a mailbox without one holds mail for a key that
-   does not live on this machine. No other verb writes one: `read`
-   advanced a cursor onto an unclaimed mailbox until 0.5.3, claiming
-   it as a side effect of consuming, which made this guarantee false
-   in exactly the case a transport depends on it. Reading now requires
-   the claim instead of creating it
+5. a message carries its signature or it is not a message, because a
+   frame that has lost either is not a frame
+6. a mailbox directory exists if and only if its owner claimed it here
+   with `beb init`. Nothing else creates one: mail for a key that
+   reads elsewhere goes to the outbox
 
 The sixth is what makes the spool answer a question it is never asked
-directly: who lives here. `init` writes a cursor, delivery never does,
-so a mailbox that has one has a reader and a mailbox that has none is
-mail with nowhere local to go. That was true before it was written
-down; it is a guarantee now because a transport reads it to decide
-what to carry, and an implementation free to write a cursor at
-delivery time would strand every outbound message in silence.
+directly: who lives here. It used to be carried by the cursor file --
+`init` wrote one and delivery did not -- because `send` created a
+mailbox for any recipient, resident or not. That made "the directory
+exists" useless as a test and left the cursor holding two meanings at
+once, with a comment in the code warning that `cursor() == 0` was not
+the residency test. Outbound mail no longer creates anything for its
+recipient, so the directory means what it looks like and the cursor is
+a position again.
+
+Delivery is deduplicated against a fixed window rather than against
+all of history: a retransmission is recognised if fewer than a thousand
+ids have been issued since the original. A duplicate is a transport
+retrying a delivery whose acknowledgement went missing, so it arrives
+close behind what it repeats -- and the window is what keeps a delivery
+from getting slower every day the mailbox is used. Compared against
+everything retained, one delivery into a fifty-thousand-message mailbox
+took 391ms; against the window it takes 20ms, and it will still take
+20ms at a million.
+
+Durability is one barrier, at the rename. A temp file under the spool's
+scratch directory is written and not synced: it is read back a moment
+later, removed on every path out, and referenced by nothing after that,
+so a crash before the rename loses a send that had not happened. What
+`place` does -- sync the file, rename it in, sync the directory -- is
+where a message becomes real, and syncing anywhere earlier buys nothing.
+
+The line matters more than it looks. On macOS Rust's `sync_all` is
+`fcntl(F_FULLFSYNC)`, which waits for the drive to flush its own write
+cache: 3.4ms measured, against 0.05ms for the `fsync(2)` that most
+software calls and believes is durable. Two redundant barriers were 27%
+of a send.
 
 Only beb writes messages. How it writes them is implementation, free
-to change: a per-mailbox flock, counter first, then signature, then
-message, each write-fsync-rename, so a crash leaves a gap in the
-numbering, never a reused id, never a visible message without its
-signature. A send that fails midway, out of disk included, may consume
-an id and leave a stray signature: debris that is never a message,
-prunable like anything stored. What cannot happen is a visible
-message without its signature.
+to change: a per-mailbox flock, counter first, then the frame, each
+write-fsync-rename, so a crash leaves a gap in the numbering and never
+a reused id. "Never a visible message without its signature" used to be
+a property of the write order; it is a property of the format now,
+since a frame carries both or parses as neither.
+
+A send that fails midway, out of disk included, may consume an id and
+leave nothing at that number: a gap, which is legal and says only that
+the id is not there.
 
 Pruning is not writing, and it was never beb's. Retention is local
 policy, gaps are legal, and every refusal beb speaks names the exact
@@ -477,6 +502,55 @@ directory it did not create is the operator's.
 Local filesystem only, never NFS: the flock and rename atomicity
 this leans on are kernel guarantees network filesystems do not keep.
 
+## The outbox
+
+A message for a key that reads on this machine goes into that key's
+mailbox. A message for a key that does not goes to
+
+    ~/.local/share/beb/outbox/000000000000000001
+
+flat, one file, ids of its own. Not into a mailbox nobody claimed,
+which is where it went until 0.9.0.
+
+Three things follow, and the third is why it was worth doing.
+
+A carrier watches one directory rather than one per correspondent, so
+"is there anything to move" is a single kernel watch.
+
+`init` is now the only thing that creates a mailbox directory, so
+residency is the directory existing. The cursor used to carry that
+meaning as well as the read position -- two facts in one file, with a
+comment in the code warning that `cursor() == 0` was not the residency
+test, because a reader who has consumed nothing and a stranger both
+read back as zero. One meaning has moved out. The cursor is a position.
+
+And `drop` can be strict where `send` is permissive. Originating mail
+may be held for elsewhere; arriving mail may not, because a frame that
+reached the wrong machine and were then queued onward would circulate
+forever. `send` outboxes a non-resident recipient; `drop` refuses one.
+The asymmetry looks arbitrary until you have watched a delivery orbit.
+
+Mail can arrive before its reader does: an identity carried here after
+somebody wrote to it finds its mail already queued to leave. `init`
+takes it back when it claims, because shipping it out would carry it
+away from the only machine that can deliver it.
+
+    beb: 1 already waiting, 1 taken back from the outbox; beb list
+         shows them
+
+A carrier moves what it finds with two verbs and no knowledge of the
+spool's shape:
+
+    beb pickup            the oldest frame on stdout;
+                          its id and recipient on stderr
+    beb rm ID             once it has landed
+
+`pickup` names the recipient so that nothing which moves bytes has to
+parse a frame to route one. It does not remove: a carrier that dies
+mid-transfer must find the delivery still there, and `rm` is the
+separate act that says it landed. beb keeps no attempt counts and no
+notion of in-flight -- custody belongs to whatever moves the bytes.
+
 ## Interface
 
     beb init NAME
@@ -500,8 +574,12 @@ this leans on are kernel guarantees network filesystems do not keep.
 
     beb pack RECIPIENT --subject S [--body B]
         sign one delivery onto stdout
-    beb receive
+    beb drop
         install one delivery from stdin
+    beb pickup
+        hand over the oldest outbound delivery; the outbox keeps it
+    beb rm ID
+        remove one outbound delivery, once a carrier has it
 
     beb --help
         this list
@@ -662,19 +740,19 @@ So each verb says what it did to the spool:
                           in ~/.local/share/beb, cursor at 0
     beb pack bob          packed for bob, "deploy blocked";
                           574-byte delivery
-    beb receive           accepted 4 for backend; from alice,
+    beb drop           accepted 4 for backend; from alice,
                           "deploy blocked"
-    beb receive           already delivered as 4; nothing added
+    beb drop           already delivered as 4; nothing added
     beb send alice        accepted for alice; 22 bytes; alice reads
                           it here
     beb send bob          accepted for bob; 22 bytes; nobody here
                           reads it
                           beb pack bob writes a delivery you can
                           carry to that machine
-    beb list              cursor at 3; 5 total, 2 unread; showing 2
+    beb list              cursor at 3; showing 2, more waiting
                           4  now  deploy blocked   alice
                           5  2h   schema question  frontend
-    beb list --limit 0    cursor at 3; 5 total, 2 unread; showing 5
+    beb list --limit 0    cursor at 3; showing 5
     beb read              4 from alice, "deploy blocked",
                           2026-08-15 09:26; cursor 3 -> 4
     beb peek 5            5 from alice, "schema question",
@@ -827,12 +905,12 @@ empty file without opening it -- an agent reading beb cold asked for
 reports is the whole frame, header included, measured rather than
 assumed, because the header is a line and not a fixed width.
 
-`receive` learned it just before. Its ack went to stdout,
+`drop` learned it just before. Its ack went to stdout,
 unprefixed, until 0.6.0 -- and a transport is exactly the caller that
-cannot cope with that, since beb-ssh runs `beb receive` with stdout
+cannot cope with that, since beb-ssh runs `beb drop` with stdout
 inherited, so beb's prose landed in the middle of the transport's own
 output with nothing to filter it by. The id it printed was no use
-either: `receive` resolves no identity, holds no key and never reads,
+either: `drop` resolves no identity, holds no key and never reads,
 so the process running it cannot open the message it just named. Both
 of beb-ssh's call sites look only at the exit code, which is the whole
 answer a caller needs, and a replay stays exit 0 because a transport
@@ -973,13 +1051,13 @@ A message can leave the machine as an mbeb: the exact signed
 envelope bytes and their detached signature, safely framed. `.mbeb`
 is the conventional filename when one is persisted; the extension
 has no semantic effect, is never part of the signed data, and
-`receive` reads stdin as the sole authority. beb still never touches
-a network: `pack` makes bytes, `receive` accepts bytes, and how they
+`drop` reads stdin as the sole authority. beb still never touches
+a network: `pack` makes bytes, `drop` accepts bytes, and how they
 travel — ssh, http, a pipe, a copied file — is the operator's
 choice, owed nothing by beb.
 
     beb pack bob "the schema is ready" > note.mbeb
-    beb pack bob < report.md | ssh host beb receive
+    beb pack bob < report.md | ssh host beb drop
 
 The frame is lengths-then-bytes:
 
@@ -1006,7 +1084,7 @@ counter, or cursor is touched anywhere. Its stdout is the product
 and its success is silent. Bodies stream through disk both ways;
 nothing holds a body in memory.
 
-`receive` installs into the mailbox the envelope names, and
+`drop` installs into the mailbox the envelope names, and
 resolves no identity of its own: the delivery already carries its
 address, receiving is not reading, and nothing on this path needs a
 private key. It is the same act as a local `send`, which has always
@@ -1034,7 +1112,7 @@ somebody else is precisely the case that must not admit anything.
 
 Admission runs before anything is stored. The address lives inside
 the envelope, so the check cannot come first in the frame, but it
-can come first on disk: `receive` reads the header prefix into
+can come first on disk: `drop` reads the header prefix into
 memory, bounded by the same limit the envelope grammar has always
 had, and refuses a stranger there. A caller who is not writing to a
 resident spends none of the recipient's disk, whatever its lengths
@@ -1045,13 +1123,13 @@ checked, and that is inherent rather than an oversight: a signature
 covers the whole envelope, so nothing that refuses to hold a body in
 memory can verify one before storing it. What admission buys is that
 only a resident's address can ask for the space. Beyond that, how
-much a carrier may deliver is the carrier's question — `receive`
+much a carrier may deliver is the carrier's question — `drop`
 reads one frame from stdin and authenticates the bytes; who is
 allowed to hand it a frame belongs to the transport, which is the
 piece that has a peer to authenticate. Exposed with no transport in
-front of it, `receive` is as open as the pipe feeding it.
+front of it, `drop` is as open as the pipe feeding it.
 
-`receive` verifies before anything becomes visible: frame, envelope
+`drop` verifies before anything becomes visible: frame, envelope
 grammar, ed25519 only, a mailbox that is claimed, signature, and only
 then installs through the same lock, counter, write ordering, and
 durability as local delivery. Failure at any step is fail-closed
@@ -1072,7 +1150,7 @@ a watching runtime notices the arrival the way it notices any other.
 
 The transport is untrusted: it may copy, delay, reorder, replay, or
 inspect deliveries, and authentication comes solely from the signed
-bytes. `receive` is idempotent over retained history: a delivery
+bytes. `drop` is idempotent over retained history: a delivery
 whose exact envelope bytes are already present is accepted without a
 second copy, and the ack names the existing id (`accepted <id>;
 already delivered`) — so a store-and-forward carrier may retry
@@ -1088,7 +1166,7 @@ bytes is the same message.
 
 ## Out of scope
 
-Moving bytes between machines (`pack` emits and `receive` accepts;
+Moving bytes between machines (`pack` emits and `drop` accepts;
 every carrier is the operator's choice), relays, admission,
 deduplication, broadcast, presence, threads, wake policy. Whatever
 comes later, the envelope and the reader guarantees do not change.

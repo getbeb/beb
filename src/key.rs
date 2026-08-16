@@ -37,6 +37,31 @@ fn valid_ed25519_blob(b64: &str) -> bool {
     }
 }
 
+/// The name of this key's mailbox: the 32 raw key bytes, in hex.
+///
+/// Not a hash of the key text. The two are the same length -- ed25519
+/// keys and sha256 digests are both 32 bytes -- so nothing about the
+/// spool's shape changes, but this one is derivable without hashing and
+/// reversible back to the key it names. That matters because a
+/// transport must never have to compute a spool path: the one that did
+/// carried its own sha256 to do it, and drifted.
+///
+/// Only ed25519 reaches a mailbox. Every other key type is refused by
+/// name at every use site -- `send`, `pack`, `receive` and the frame
+/// reader all check `is_ed25519` first -- so the fallback below is
+/// unreachable, and exists so this function is total rather than
+/// fallible at eight call sites that have already ruled it out.
+pub fn mailbox_name(canonical: &str) -> String {
+    if let Some(b64) = canonical.split_whitespace().nth(1) {
+        if let Some(blob) = crate::util::b64_decode(b64) {
+            if blob.len() == 51 && &blob[4..15] == b"ssh-ed25519" {
+                return blob[19..51].iter().map(|b| format!("{b:02x}")).collect();
+            }
+        }
+    }
+    crate::util::sha256_hex(canonical)
+}
+
 /// Tolerant parse of public key text: `<type> <base64> [comment]`,
 /// surrounding whitespace and any trailing comment ignored. An ed25519
 /// key must decode to an actual ed25519 public-key blob: "identity is a

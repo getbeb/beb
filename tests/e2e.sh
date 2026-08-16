@@ -49,7 +49,26 @@ mkid() { mkdir -p "$W/$1" && (cd "$W/$1" && "$BEB" init "$1") >"$OUT" 2>"$ERR"; 
 unname() { grep -v "^$1 " "$KS" >"$KS.un" 2>/dev/null; mv "$KS.un" "$KS"; }
 addr() { pin "$1" whoami 2>/dev/null; }
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi; }
-mbox() { echo "$SPOOL/$(printf '%s' "$(addr "$1")" | sha)"; }
+# A mailbox is named for the key itself, not a hash of it: the 32 raw
+# ed25519 bytes in hex. Derivable without hashing, and reversible.
+keyhex() { python3 -c '
+import base64,sys
+blob = base64.b64decode(sys.argv[1].split()[1])
+sys.stdout.write(blob[19:51].hex())' "$1"; }
+mbox() { echo "$SPOOL/$(keyhex "$(addr "$1")")"; }
+# A stored message is one file: the frame, header first. Planting one by
+# hand means assembling it the way delivery does.
+plant() { # <mailbox> <id> <envelope> <signature>
+    e=$(wc -c <"$3" | tr -d ' '); g=$(wc -c <"$4" | tr -d ' ')
+    { printf 'beb %s %s\n' "$e" "$g"; cat "$3" "$4"; } >"$1/msg/$2"
+    # Delivery raises the counter before it places the message, and the
+    # counter is what makes an id guessable -- nothing above it is looked
+    # for. A fixture that skipped this would plant a message beb has no
+    # reason to believe exists.
+    cur=$(cat "$1/.counter" 2>/dev/null || echo 0)
+    [ "$((10#$2))" -gt "$((10#$cur))" ] && printf '%s' "$((10#$2))" >"$1/.counter"
+    :
+}
 
 # ---- version -----------------------------------------------------------
 
@@ -121,8 +140,8 @@ merged_is_stdout "list"   pin um1 list
 merged_is_stdout "send"   pin um1 send "$UM2" --subject s --body b
 merged_is_stdout "wait"   pin um2 wait --timeout 0
 pin um2 read >/dev/null 2>&1
-"$BEB" receive <"$HOME/um.mbeb" >"$HOME/um.out" 2>/dev/null
-"$BEB" receive <"$HOME/um.mbeb" 2>&1 | grep -v '^beb:' >"$HOME/um.merged"
+"$BEB" drop <"$HOME/um.mbeb" >"$HOME/um.out" 2>/dev/null
+"$BEB" drop <"$HOME/um.mbeb" 2>&1 | grep -v '^beb:' >"$HOME/um.merged"
 cmp -s "$HOME/um.out" "$HOME/um.merged" || die "receive: the merge did not un-merge"
 ok "every verb un-merges: grep -v '^beb:' is exactly stdout"
 
@@ -232,8 +251,8 @@ test "$(grep -c 'by name\|by key' "$OUT")" = 2 ||
 ok "the name resolves to the address; the key still addresses it directly"
 
 # whoami says the name as well as the address, because init took one.
-# The address stays alone on stdout: a mailbox is sha256 of exactly
-# those bytes, and beb-ssh computes one by hashing what whoami prints.
+# The address stays alone on stdout: a mailbox is named for exactly
+# those bytes, and anything computing a path derives it from them.
 bx namedid whoami || die "whoami named"
 test "$(cat "$OUT")" = "$NID" || die "whoami stdout is not the address alone: $(cat "$OUT")"
 grep -q "named namedid here" "$ERR" || die "whoami does not say the name: $(cat "$ERR")"
@@ -458,7 +477,7 @@ ok "no short form appears anywhere in the help"
 "$BEB" --help >"$OUT" 2>/dev/null
 awk 'length($0) > 78 { print; found=1 } END { exit found }' "$OUT" ||
     die "a help line runs past 78 columns"
-test "$(grep -c '^  beb ' "$OUT")" = 12 || die "the help does not list 12 entries"
+test "$(grep -c '^  beb ' "$OUT")" = 14 || die "the help does not list 14 entries"
 # Every signature is followed by exactly one indented description.
 awk '/^  beb /{ want=1; next } want { if ($0 !~ /^      [^ ]/) { print NR": "$0; bad=1 } want=0 } END { exit bad }' "$OUT" ||
     die "a signature is not followed by an indented description"
@@ -492,25 +511,29 @@ ok "a subject is one plain line, non-empty, and at most 120 bytes"
 # clock behind it is not.
 bx b send c --subject "dated" --body x || die "dated send"
 MB_C=$(mbox c)
-LAST=$(ls "$MB_C/messages" | sort | tail -1)
-grep -qE '^date: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$MB_C/messages/$LAST" ||
-    die "no RFC3339 date header in the envelope: $(head -5 "$MB_C/messages/$LAST")"
-SENT=$(sed -n 's/^date: //p' "$MB_C/messages/$LAST" | head -1)
+LAST=$(ls "$MB_C/msg" | sort | tail -1)
+grep -qE '^date: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$MB_C/msg/$LAST" ||
+    die "no RFC3339 date header in the envelope: $(head -5 "$MB_C/msg/$LAST")"
+SENT=$(sed -n 's/^date: //p' "$MB_C/msg/$LAST" | head -1)
 NOWS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 test "${SENT%T*}" = "${NOWS%T*}" || die "date is not today: $SENT vs $NOWS"
 ok "send stamps an RFC3339 UTC date the envelope carries"
 
 # It is signed like every other byte, so it cannot be edited in place.
-python3 - "$MB_C/messages/$LAST" <<'EOF' || die "could not rewrite the date"
+# Same length in, same length out, so the frame header stays true and
+# the signature is the only thing left to object.
+python3 - "$MB_C/msg/$LAST" <<'EOF' || die "could not rewrite the date"
 import sys, re
 p = sys.argv[1]
 b = open(p, 'rb').read()
-open(p, 'wb').write(re.sub(rb'date: [^\n]*', b'date: 1999-01-01T00:00:00Z', b, count=1))
+out = re.sub(rb'\ndate: [^\n]{20}', b'\ndate: 1999-01-01T00:00:00Z', b, count=1)
+assert len(out) == len(b), "rewrite changed the frame length"
+open(p, 'wb').write(out)
 EOF
 bx c peek $((10#$LAST)) && die "a message with an edited date verified"
 grep -q "failed verification" "$ERR" || die "edited date was not caught by the signature: $(cat "$ERR")"
 ok "the date is inside the signature: editing it destroys the message"
-rm -f "$MB_C/messages/$LAST" "$MB_C/signatures/$LAST"
+rm -f "$MB_C/msg/$LAST"
 
 # A date beb did not write is refused at the grammar, so a delivery
 # cannot carry a shape beb would then have to interpret.
@@ -524,12 +547,11 @@ for bad in "2026-08-15 02:26:34Z" "2026-08-15T02:26:34+00:00" "2026-02-30T00:00:
     # on a stale one from the previous iteration.
     rm -f "$ENV2.sig"
     ssh-keygen -Y sign -n beb -f "$W/dt/.beb/id_ed25519" "$ENV2" 2>/dev/null </dev/null || die "sign $bad"
-    DT_MB="$SPOOL/$(printf '%s' "$DT" | sha)"
-    cp "$ENV2" "$DT_MB/messages/000000000000000042"
-    cp "$ENV2.sig" "$DT_MB/signatures/000000000000000042"
+    DT_MB="$SPOOL/$(keyhex "$DT")"
+    plant "$DT_MB" 000000000000000042 "$ENV2" "$ENV2.sig"
     env BEB_IDENTITY="$W/dt" "$BEB" read >"$OUT" 2>"$ERR" && die "malformed date accepted: $bad"
     grep -q "date is not YYYY-MM-DDTHH:MM:SSZ" "$ERR" || die "date refusal for \"$bad\": $(cat "$ERR")"
-    rm -f "$DT_MB/messages/000000000000000042" "$DT_MB/signatures/000000000000000042"
+    rm -f "$DT_MB/msg/000000000000000042"
 done
 ok "a date beb did not write is refused at the grammar, signature or not"
 
@@ -551,31 +573,43 @@ ok "an empty body is accepted and said out loud"
 mkdir -p "$W/stranger"
 (cd "$W/stranger" && "$BEB" init stranger) >"$HOME/s.out" 2>/dev/null || die "init stranger"
 S=$(cat "$HOME/s.out")
-rm -rf "$SPOOL/$(printf '%s' "$S" | sha)"
+rm -rf "$SPOOL/$(keyhex "$S")"
 bx b send "$S" --subject "into the void" --body "body for a stranger" || die "send to unclaimed"
-grep -q 'nobody here reads it$' "$ERR" ||
-    die "send to an unclaimed mailbox reads as local delivery: $(cat "$ERR")"
+grep -q 'nobody here reads it, so it waits in the outbox as [0-9]*$' "$ERR" ||
+    die "send to a non-resident reads as local delivery: $(cat "$ERR")"
 # The next step is named in beb's own vocabulary. An agent learns this
 # tool from this tool, so a word for something beb neither implements
 # nor defines is a word it cannot look up.
-grep -q '^beb: beb pack .* --subject ".*" writes a delivery you can carry' "$ERR" ||
-    die "the unclaimed ack does not name a verb beb has: $(cat "$ERR")"
-grep -qi 'carrier' "$ERR" && die "beb printed \"carrier\", which is not one of its own words"
-ok "an unclaimed mailbox names beb pack, in vocabulary the help text defines"
+grep -q '^beb: a carrier takes it from there; beb pickup hands over the next one$' "$ERR" ||
+    die "the outbox ack does not name a verb beb has: $(cat "$ERR")"
+ok "a non-resident recipient sends to the outbox, and the ack names beb pickup"
 
-# The advice must be followable exactly as printed: a key is one
-# argument, and beb refuses an unquoted one.
-PACKARG=$(sed -n 's/^beb: beb pack \(.*\) writes a delivery.*/\1/p' "$ERR")
-eval "pin b pack $PACKARG --body 'following the advice'" >"$HOME/advice.mbeb" 2>"$ERR" ||
-    die "the printed beb pack command was refused: $(cat "$ERR")"
-test -s "$HOME/advice.mbeb" || die "the printed beb pack command produced no delivery"
-ok "the beb pack line it prints runs as printed, quoting and all"
+# It never creates a mailbox for somebody who does not read here. That
+# is what makes a directory in the spool mean a reader lives here, which
+# is in turn what lets `drop` refuse a stranger.
+test -e "$SPOOL/$(keyhex "$S")" &&
+    die "sending to a non-resident created a mailbox for them"
+test -f "$SPOOL/outbox/000000000000000001" ||
+    die "the delivery is not in the outbox: $(ls "$SPOOL/outbox" 2>&1)"
+ok "a mailbox in the spool means a reader here; outbound mail is not one"
 
-# Delivery must never claim a mailbox on the recipient's behalf: that
-# bit is what a transport reads to decide what to carry.
-test -e "$SPOOL/$(printf '%s' "$S" | sha)/cursor" &&
-    die "delivery wrote a cursor, claiming a mailbox for an absent owner"
-ok "delivery creates a mailbox and never claims it"
+# The outbox hands it over whole, and keeps it until told otherwise.
+pin b pickup >"$HOME/out.mbeb" 2>"$ERR" || die "pickup: $(cat "$ERR")"
+grep -q '^beb: outbound 1 for ' "$ERR" || die "pickup does not name the id and recipient: $(cat "$ERR")"
+grep -q 'beb rm 1 once it has landed' "$ERR" || die "pickup does not name rm: $(cat "$ERR")"
+# The address, not the alias: a carrier routes on this, and a name is
+# local, the reader's, and missing for anyone unnamed.
+grep -q "^beb: to $S$" "$ERR" || die "pickup does not name the address: $(cat "$ERR")"
+head -c 4 "$HOME/out.mbeb" | grep -qx 'beb ' || die "pickup did not hand over a frame"
+test -f "$SPOOL/outbox/000000000000000001" || die "pickup removed what it handed over"
+ok "pickup hands over the oldest frame whole and keeps it"
+
+bx b rm 1 || die "rm: $(cat "$ERR")"
+grep -q 'outbound 1 removed' "$ERR" || die "rm ack: $(cat "$ERR")"
+test -e "$SPOOL/outbox/000000000000000001" && die "rm left the delivery behind"
+bx b pickup && die "pickup succeeded on an empty outbox"
+grep -q 'the outbox is empty' "$ERR" || die "empty pickup: $(cat "$ERR")"
+ok "rm removes one delivery; an empty outbox is nothing to do, not a failure"
 
 bx b send "$B" --subject "note to self" --body "the body of the note" || die "send to self"
 grep -q '^beb: accepted for you; 20 bytes; it waits on this machine for beb read$' "$ERR" ||
@@ -759,7 +793,7 @@ ok "the help names what an exit code means"
 # reads that instant out on the clock the reader is looking at. No
 # offset and no seconds: both are precision for comparing instants
 # between machines, which is the envelope's job and already done there.
-STORED=$(sed -n 's/^date: //p' "$(mbox look)/messages/000000000000000001")
+STORED=$(sed -n 's/^date: //p' "$(mbox look)/msg/000000000000000001")
 case "$STORED" in *Z) ;; *) die "the stored date is not UTC: $STORED" ;; esac
 UTC_SHAPE="${STORED%:*}"; UTC_SHAPE="${UTC_SHAPE/T/ }"
 TZ=UTC bx look peek 1 || die "peek under TZ=UTC"
@@ -802,17 +836,25 @@ printf 'schema question' | diff - "$OUT" >/dev/null || die "order after inspect"
 ok "consumption continues in id order after inspect"
 
 MB_A=$(mbox a)
-rm "$MB_A/messages/000000000000000003" "$MB_A/signatures/000000000000000003" || die "make gap"
+rm "$MB_A/msg/000000000000000003" || die "make gap"
 bx a read || die "read over gap"
 printf 'raw key send' | diff - "$OUT" >/dev/null || die "gap not skipped: $(cat "$OUT")"
 ok "gap stepped over silently, inspected message still consumed"
 
-printf 'garbage' >"$MB_A/signatures/000000000000000005"
+# The signature lives behind the body in the same file now, so
+# corrupting it means writing over the frame's tail. The length in the
+# header stays right; the bytes do not.
+python3 - "$MB_A/msg/000000000000000005" <<'EOF' || die "could not corrupt the signature"
+import sys
+p = sys.argv[1]
+b = bytearray(open(p, 'rb').read())
+b[-40:] = b'X' * 40
+open(p, 'wb').write(bytes(b))
+EOF
 bx a read && die "corrupt signature consumed"
 grep -q "failed verification" "$ERR" || die "corrupt refusal text"
 grep -q "rm '" "$ERR" || die "corrupt refusal names rm"
-grep -q "messages/000000000000000005" "$ERR" || die "refusal names message file"
-grep -q "signatures/000000000000000005" "$ERR" || die "refusal names signature file"
+grep -q "msg/000000000000000005" "$ERR" || die "refusal names the message file"
 test -s "$OUT" && die "refusal printed body bytes"
 ok "corrupt signature: refused before printing, rm named"
 
@@ -823,7 +865,7 @@ ok "cursor unmoved by refusal"
 test -z "$(ls -A "$SPOOL/.tmp" 2>/dev/null)" || die "refusal left scratch litter: $(ls "$SPOOL/.tmp")"
 ok "refusal paths leave no litter in .tmp"
 
-rm "$MB_A/messages/000000000000000005" "$MB_A/signatures/000000000000000005"
+rm "$MB_A/msg/000000000000000005"
 bx a read || die "read after prune"
 printf 'still fine' | diff - "$OUT" >/dev/null || die "stream did not resume: $(cat "$OUT")"
 ok "after rm, stream resumes past the gap"
@@ -855,13 +897,13 @@ ok "read takes no id and peek moves no cursor: the verb is the effect"
 # truncated read; on stdout it would corrupt `beb list | wc -l`; behind
 # the rows it is what a head or a display limit throws away first.
 bx a list --after 0 --limit 0 || die "full list"
-grep -q '^beb: cursor at [0-9]*; [0-9]* total, [0-9]* unread; showing [0-9]*$' "$ERR" ||
+grep -q '^beb: cursor at [0-9]*; showing [0-9]*$' "$ERR" ||
     die "full list header: $(cat "$ERR")"
 grep -q 'cursor at' "$OUT" && die "the header landed on stdout, where it would be counted as a message"
 # Exit is 0 or 2 depending on whether anything was unread; the header
 # is printed either way, which is the whole point of it.
 bx a list
-grep -q '^beb: cursor at [0-9]*; [0-9]* total, [0-9]* unread; showing [0-9]*$' "$ERR" || die "list header: $(cat "$ERR")"
+grep -q '^beb: cursor at [0-9]*; showing [0-9]*$' "$ERR" || die "list header: $(cat "$ERR")"
 CUR_NOW=$(cat "$(mbox a)/cursor")
 grep -q "^beb: cursor at $CUR_NOW;" "$ERR" || die "the header does not state the real cursor: $(cat "$ERR")"
 UNREAD=$(grep -c . "$OUT")
@@ -888,16 +930,26 @@ env BEB_IDENTITY="$W/pg" "$BEB" read >/dev/null 2>&1 || die "read one"
 bx pg list || die "paged list"
 test "$(grep -c . "$OUT")" = 10 || die "default page is not 10 rows: $(grep -c . "$OUT")"
 head -1 "$OUT" | grep -q '^ *2  ' || die "the page does not start at the cursor: $(head -1 "$OUT")"
-grep -q '^beb: cursor at 1; 14 total, 13 unread; showing 10$' "$ERR" || die "paged header: $(cat "$ERR")"
-ok "list pages from the cursor forward, and the header says how many it showed"
+grep -q '^beb: cursor at 1; showing 10, more waiting$' "$ERR" || die "paged header: $(cat "$ERR")"
+# A window that does not say it is a window reads as the whole. The
+# counts are gone -- they cost a full scan -- but "more waiting" is one
+# stat, and it is the part a consumer carrying a single line needs.
+# The header carries no totals. Counting everything a mailbox holds, and
+# everything above the cursor, cost a full directory read on every
+# listing -- 292ms at 200k messages -- to print two numbers nobody acts
+# on. Where the window is, and whether there is more, are what a pager
+# needs, and the hints below say the second as a command.
+grep -q 'total' "$ERR" && die "the header still counts the whole mailbox"
+grep -q '^beb: newer: beb list --after 11$' "$ERR" || die "no newer hint: $(cat "$ERR")"
+ok "list pages from the cursor forward, says how many it showed, and names the next page"
 
 # The header is what makes a window safe to print: a paged listing that
 # did not say it was paged would read as the whole, and an agent would
 # act on a tenth of its mail believing it had seen all of it.
 bx pg list --limit 3 || die "list --limit 3"
 test "$(grep -c . "$OUT")" = 3 || die "-n 3 gave $(grep -c . "$OUT") rows"
-grep -q '13 unread; showing 3$' "$ERR" || die "-n header: $(cat "$ERR")"
-ok "-n narrows the window while the header keeps the totals"
+grep -q 'showing 3, more waiting$' "$ERR" || die "-n header: $(cat "$ERR")"
+ok "-n narrows the window and the header says how narrow"
 
 # An explicit -f is a request, not a filter, so already-read messages
 # are in range.
@@ -1017,13 +1069,12 @@ E=$(addr e)
 bx d send e --subject "for e" --body "for e only" || die "send d->e"
 MB_D=$(mbox d)
 MB_E=$(mbox e)
-cp "$MB_E/messages/000000000000000001" "$MB_D/messages/000000000000000090"
-cp "$MB_E/signatures/000000000000000001" "$MB_D/signatures/000000000000000090"
+cp "$MB_E/msg/000000000000000001" "$MB_D/msg/000000000000000090"
+printf '90' >"$MB_D/.counter"
 
 bx d read && die "misaddressed message consumed"
 grep -q "someone else" "$ERR" || die "wrong-to refusal text"
-grep -q "messages/000000000000000090" "$ERR" || die "wrong-to refusal names message"
-grep -q "signatures/000000000000000090" "$ERR" || die "wrong-to refusal names signature"
+grep -q "msg/000000000000000090" "$ERR" || die "wrong-to refusal names the message"
 ok "consume refuses a valid message addressed elsewhere"
 
 bx d peek 90 && die "misaddressed message inspected"
@@ -1034,7 +1085,7 @@ bx d list || die "list after a binding refusal"
 grep -q '^90  ' "$OUT" || die "cursor advanced past misaddressed"
 ok "cursor unmoved by binding refusal"
 
-rm "$MB_D/messages/000000000000000090" "$MB_D/signatures/000000000000000090"
+rm "$MB_D/msg/000000000000000090"
 bx e send d --subject "legit" --body "legit mail" || die "send e->d"
 bx d read || die "read after removing misaddressed"
 printf 'legit mail' | diff - "$OUT" >/dev/null || die "resume body"
@@ -1051,13 +1102,13 @@ ENVF=$HOME/intruder
 printf 'from: %s\nto: %s\nnonce: AAAAAAAAAAAAAAAAAAAAAA==\ndate: 2026-08-15T02:26:34Z\nsubject: intruding\n\nintruder' \
     "$(awk '{print $1" "$2}' "$HOME/ec.pub")" "$D" >"$ENVF"
 ssh-keygen -Y sign -n beb -f "$HOME/ec" "$ENVF" 2>/dev/null || die "manual ecdsa sign"
-cp "$ENVF" "$MB_D/messages/000000000000000091"
-cp "$ENVF.sig" "$MB_D/signatures/000000000000000091"
+NEXT_D=$(printf '%018d' $(( $(cat "$MB_D/.counter") + 1 )))
+plant "$MB_D" "$NEXT_D" "$ENVF" "$ENVF.sig"
 bx d read && die "foreign-from envelope consumed"
 grep -q "non-ed25519" "$ERR" || die "foreign-from refusal text"
 grep -q "rm '" "$ERR" || die "foreign-from refusal names rm"
 ok "validly signed non-ed25519 from: refused"
-rm "$MB_D/messages/000000000000000091" "$MB_D/signatures/000000000000000091"
+rm "$MB_D/msg/$NEXT_D"
 
 # ---- wait: block until there is something to read ----------------------
 
@@ -1073,7 +1124,7 @@ t1=$(date +%s)
 test $((t1 - t0)) -lt 10 || die "wait took $((t1 - t0))s; not event-driven"
 grep -qx '[0-9]+' "$OUT" 2>/dev/null || grep -qE '^[0-9]+$' "$OUT" ||
     die "wait did not hand back a mark: $(cat "$OUT")"
-grep -q '^beb: mail arrived; 1 unread; next mark [0-9]*$' "$ERR" || die "arrival receipt: $(cat "$ERR")"
+grep -q '^beb: mail arrived; next mark [0-9]*$' "$ERR" || die "arrival receipt: $(cat "$ERR")"
 ok "wait blocks with nothing unread and wakes on arrival"
 
 # Something unread: it returns at once. No --timeout, so a wait that did
@@ -1082,7 +1133,7 @@ t0=$(date +%s)
 (pin w1 wait) >"$OUT" 2>"$ERR" || die "wait did not return with unread mail in front of it"
 t1=$(date +%s)
 test $((t1 - t0)) -le 2 || die "wait took $((t1 - t0))s to notice mail it already had"
-grep -q '^beb: 1 unread; next mark [0-9]*$' "$ERR" || die "standing receipt: $(cat "$ERR")"
+grep -q '^beb: mail is waiting; next mark [0-9]*$' "$ERR" || die "standing receipt: $(cat "$ERR")"
 ok "wait returns at once when mail is already unread"
 
 # Which makes the obvious worker loop correct: a message arriving while
@@ -1103,7 +1154,7 @@ done
 wait
 test "$handled" = 2 || die "the worker loop handled $handled of 2 messages"
 pin lp list >"$OUT" 2>"$ERR"
-grep -q '0 unread' "$ERR" || die "the loop left mail unread: $(cat "$ERR")"
+grep -q 'showing 0$' "$ERR" || die "the loop left mail unread: $(cat "$ERR")"
 ok "while beb wait; do beb read; done drains without stalling"
 
 # --from names a mark of the caller's own, for a waiter that must not
@@ -1232,7 +1283,7 @@ ok "an empty BEB_IDENTITY is unset, never a fallback to cwd"
 # private key. The only followable instruction destroyed the identity.
 mkdir -p "$W/csrc" && (cd "$W/csrc" && "$BEB" init csrc) >"$HOME/cs.out" 2>/dev/null || die "init csrc"
 CS=$(cat "$HOME/cs.out")
-CS_MB="$SPOOL/$(printf '%s' "$CS" | sha)"
+CS_MB="$SPOOL/$(keyhex "$CS")"
 mkdir -p "$W/carried" && cp -R "$W/csrc/.beb" "$W/carried/.beb"
 rm -rf "$CS_MB"                                  # as if this key had never lived here
 
@@ -1264,8 +1315,13 @@ test "$(cat "$OUT")" = "$CS" || die "adoption reported a different key"
 cmp -s "$W/carried/.beb/id_ed25519" "$W/csrc/.beb/id_ed25519" ||
     die "init overwrote the private key it was supposed to adopt"
 test -f "$CS_MB/cursor" || die "adoption wrote no cursor"
-grep -q '^beb: 1 already waiting; beb list shows them$' "$ERR" ||
-    die "adoption did not name the mail already waiting: $(cat "$ERR")"
+# Mail sent before the claim went to the outbox, queued to leave. The
+# claim takes it back: its recipient now reads here, so shipping it out
+# would carry it away from the one machine that can deliver it.
+grep -q '^beb: 1 already waiting, 1 taken back from the outbox; beb list shows them$' "$ERR" ||
+    die "adoption did not take back the mail queued to leave: $(cat "$ERR")"
+test "$(ls "$SPOOL/outbox" 2>/dev/null | grep -c .)" = 0 ||
+    die "the claimed mail is still queued to leave"
 ok "init claims a mailbox for a .beb already here, keeps the key, names waiting mail"
 
 # The mail it named is readable, which is the whole point of claiming.
@@ -1299,22 +1355,23 @@ grep -q '^beb: claimed mailbox .* cursor at 0$' "$ERR" || die "second-spool ack:
 test "$(ls "$HOME/spool2/beb" | wc -l | tr -d ' ')" = 1 || die "second spool has no mailbox"
 ok "the same key claims in a spool that has never seen it"
 
-# receive admits only a CLAIMED mailbox. The directory's existence was
-# the test until 0.5.3, and a local send to a key that lives elsewhere
-# creates that directory: one outbound message to a stranger opened this
-# machine to unbounded inbound deliveries addressed to them.
+# drop admits a resident only, and residency is now the plainest thing
+# in the spool: a mailbox directory exists. It used to be a cursor file,
+# because a local send to a key living elsewhere created the directory --
+# one outbound message to a stranger opened this machine to unbounded
+# inbound deliveries addressed to them. Outbound mail no longer creates
+# anything for its recipient, so the directory means what it looks like.
 mkdir -p "$W/ek" && (cd "$W/ek" && "$BEB" init ek) >"$HOME/ek.out" 2>/dev/null || die "init ek"
 EK=$(cat "$HOME/ek.out")
-EK_MB="$SPOOL/$(printf '%s' "$EK" | sha)"
+EK_MB="$SPOOL/$(keyhex "$EK")"
 env BEB_IDENTITY="$W/ek" "$BEB" pack "$EK" --subject "from outside" --body "body" >"$HOME/stranger2.mbeb" 2>/dev/null
 rm -rf "$EK_MB"                                  # as if that key lived elsewhere
 bx a send "$EK" --subject "outbound" --body "body" || die "send to an absent key failed"
-test -d "$EK_MB" || die "send did not create the outbound mailbox"
-test -e "$EK_MB/cursor" && die "send claimed a mailbox for an absent owner"
-"$BEB" receive <"$HOME/stranger2.mbeb" >"$OUT" 2>"$ERR"
-test $? -eq 3 || die "receive admitted a delivery into an unclaimed mailbox"
-grep -q "no mailbox here for" "$ERR" || die "unclaimed receive refusal: $(cat "$ERR")"
-ok "receive admits a claimed mailbox only: an outbound spool is not an open door"
+test -e "$EK_MB" && die "outbound mail created a mailbox for a key that reads elsewhere"
+"$BEB" drop <"$HOME/stranger2.mbeb" >"$OUT" 2>"$ERR"
+test $? -eq 3 || die "drop admitted a delivery for a key that does not read here"
+grep -q "no mailbox here for" "$ERR" || die "unclaimed drop refusal: $(cat "$ERR")"
+ok "drop admits a resident only: an outbox is not an open door"
 
 # ---- exit codes: the distinction prose cannot carry --------------------
 
@@ -1349,12 +1406,15 @@ test $? -eq 2 || die "a drained mailbox did not exit 2"
 # the mailbox is merely empty again -- which is the very confusion the
 # code exists to prevent.
 NEXT=$(printf '%018d' $(( $(cat "$MB_A/cursor") + 1 )))
-printf 'garbage' >"$MB_A/messages/$NEXT"
-printf 'x' >"$MB_A/signatures/$NEXT"
+printf 'garbage' >"$MB_A/msg/$NEXT"
+# Above the counter is not looked for, so a fixture has to raise it the
+# way a delivery would.
+cur=$(cat "$MB_A/.counter" 2>/dev/null || echo 0)
+[ "$((10#$NEXT))" -gt "$((10#$cur))" ] && printf '%s' "$((10#$NEXT))" >"$MB_A/.counter"
 env BEB_IDENTITY="$W/a" "$BEB" read >"$OUT" 2>"$ERR"
 test $? -eq 3 || die "a corrupt message did not exit 3: $(cat "$ERR")"
 test -s "$OUT" && die "a refused read printed a body"
-rm -f "$MB_A/messages/$NEXT" "$MB_A/signatures/$NEXT"
+rm -f "$MB_A/msg/$NEXT"
 ok "3 never collapses into 2: empty and unverifiable are different numbers"
 
 # ---- 40 parallel senders: the flock is load-bearing --------------------
@@ -1367,10 +1427,14 @@ for i in $(seq 1 40); do
 done
 wait
 MB_P=$(mbox p)
-test "$(ls "$MB_P/messages" | wc -l | tr -d ' ')" = 40 || die "parallel: $(ls "$MB_P/messages" | wc -l) messages, want 40"
-ls "$MB_P/messages" | sort | tail -1 | grep -qx '000000000000000040' || die "parallel: ids not 1..40"
-diff <(ls "$MB_P/messages" | sort) <(ls "$MB_P/signatures" | sort) >/dev/null || die "parallel: signature set differs from message set"
-ok "40 parallel senders: 40 messages, ids 1..40, no reuse, every signature present"
+test "$(ls "$MB_P/msg" | wc -l | tr -d ' ')" = 40 || die "parallel: $(ls "$MB_P/msg" | wc -l) messages, want 40"
+ls "$MB_P/msg" | sort | tail -1 | grep -qx '000000000000000040' || die "parallel: ids not 1..40"
+# A frame carries its signature or it is not a frame, so "every message
+# has one" is no longer a set comparison -- it is whether each one reads.
+for f in "$MB_P"/msg/*; do
+    head -c 4 "$f" | grep -qx 'beb ' || die "parallel: $f is not a frame"
+done
+ok "40 parallel senders: 40 messages, ids 1..40, no reuse, every one a whole frame"
 
 # ---- concurrent readers: consumption is serialized too -----------------
 
@@ -1418,12 +1482,12 @@ test "$PACKED" = "$(wc -c <"$HOME/note.mbeb" | tr -d ' ')" ||
 head -c 4 "$HOME/note.mbeb" | grep -q "^beb " || die "frame header shape"
 ok "pack: silent success, frame on stdout"
 
-test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 0 || die "pack touched the recipient mailbox"
+test "$(ls "$(mbox m2)/msg" | wc -l | tr -d ' ')" = 0 || die "pack touched the recipient mailbox"
 ok "pack delivers nothing"
 
 # receive resolves no identity: the envelope carries its address, so a
 # delivery installs from anywhere, even where no .beb exists.
-(pin nobody receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "receive failed: $(cat "$ERR")"
+(pin nobody drop <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "receive failed: $(cat "$ERR")"
 # Nothing on stdout: the id names a message in a mailbox this process
 # cannot open -- receive resolves no identity and never reads -- and
 # beb-ssh proves it from the other side, inheriting stdout at both call
@@ -1438,9 +1502,9 @@ ok "receive installs by the envelope's address, needing no identity of its own"
 
 # Standing in another identity never redirects a delivery: the address
 # decides, not the reader.
-(pin m1 pack carrier --subject "second" --body "second for m2") | (pin m3 receive) >"$OUT" 2>"$ERR" || die "receive from m3 failed: $(cat "$ERR")"
-test "$(ls "$(mbox m3)/messages" | wc -l | tr -d ' ')" = 0 || die "delivery landed in the reader's mailbox"
-test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 2 || die "delivery did not land in the addressed mailbox"
+(pin m1 pack carrier --subject "second" --body "second for m2") | (pin m3 drop) >"$OUT" 2>"$ERR" || die "receive from m3 failed: $(cat "$ERR")"
+test "$(ls "$(mbox m3)/msg" | wc -l | tr -d ' ')" = 0 || die "delivery landed in the reader's mailbox"
+test "$(ls "$(mbox m2)/msg" | wc -l | tr -d ' ')" = 2 || die "delivery did not land in the addressed mailbox"
 (pin m2 read) >"$OUT" 2>"$ERR" || die "read second"
 printf 'second for m2' | diff - "$OUT" >/dev/null || die "second body: $(cat "$OUT")"
 ok "the address decides the mailbox, never the directory receive runs in"
@@ -1450,10 +1514,10 @@ ok "the address decides the mailbox, never the directory receive runs in"
 ssh-keygen -q -t ed25519 -N "" -C stranger -f "$HOME/stranger" </dev/null || die "keygen stranger"
 echo "outsider $(awk '{print $1" "$2}' "$HOME/stranger.pub")" >>"$KS"
 (pin m1 pack outsider --subject "nobody home" --body "nobody home") >"$HOME/stranger.mbeb" || die "pack outsider"
-(pin m2 receive <"$HOME/stranger.mbeb") >"$OUT" 2>"$ERR" && die "delivery for a stranger accepted"
+(pin m2 drop <"$HOME/stranger.mbeb") >"$OUT" 2>"$ERR" && die "delivery for a stranger accepted"
 grep -q "no mailbox here" "$ERR" || die "stranger refusal text: $(cat "$ERR")"
 grep -q "beb init" "$ERR" || die "stranger refusal names the fix: $(cat "$ERR")"
-STRANGER_BOX=$(printf '%s' "$(awk '{print $1" "$2}' "$HOME/stranger.pub")" | shasum -a 256 | awk '{print $1}')
+STRANGER_BOX=$(keyhex "$(awk '{print $1" "$2}' "$HOME/stranger.pub")")
 test -d "$SPOOL/$STRANGER_BOX" && die "refused delivery minted a mailbox"
 ok "no mailbox here: refused, nothing minted, the refusal names beb init"
 
@@ -1468,7 +1532,7 @@ BEFORE=$(du -sk "$SPOOL" | awk '{print $1}')
     printf 'beb 500000000000 %s\n' "$SL"
     tail -c "+$((${#HDR} + 2))" "$HOME/stranger.mbeb"
     head -c 33554432 /dev/zero
-} | (pin m2 receive) >"$OUT" 2>"$ERR" && die "unbounded delivery for a stranger accepted"
+} | (pin m2 drop) >"$OUT" 2>"$ERR" && die "unbounded delivery for a stranger accepted"
 grep -q "no mailbox here" "$ERR" || die "unbounded stranger refusal text: $(cat "$ERR")"
 AFTER=$(du -sk "$SPOOL" | awk '{print $1}')
 test "$((AFTER - BEFORE))" -lt 1024 || die "refused delivery wrote $((AFTER - BEFORE))KB to the spool"
@@ -1480,29 +1544,29 @@ ok "a claimed 500GB envelope for a stranger: refused before a byte reaches disk"
 # impossible one before reading any of it.
 BEFORE=$(du -sk "$SPOOL" | awk '{print $1}')
 { printf 'beb 500000000000 500000000000\n'; head -c 1048576 /dev/zero; } |
-    (pin m2 receive) >"$OUT" 2>"$ERR" && die "absurd signature length accepted"
+    (pin m2 drop) >"$OUT" 2>"$ERR" && die "absurd signature length accepted"
 grep -q "no ssh signature exceeds" "$ERR" || die "signature cap refusal text: $(cat "$ERR")"
 AFTER=$(du -sk "$SPOOL" | awk '{print $1}')
 test "$((AFTER - BEFORE))" -lt 1024 || die "refused frame wrote $((AFTER - BEFORE))KB to the spool"
 ok "a signature length no signature can have is refused at the frame"
 
-(pin m2 receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "replay errored"
+(pin m2 drop <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "replay errored"
 test -s "$OUT" && die "a replayed receive wrote to stdout: $(cat "$OUT")"
 grep -q '^beb: already delivered as 1; nothing added$' "$ERR" || die "replay ack: $(cat "$ERR")"
-test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 2 || die "replay installed a second copy"
+test "$(ls "$(mbox m2)/msg" | wc -l | tr -d ' ')" = 2 || die "replay installed a second copy"
 ok "replay: idempotent, acks the existing id, no second copy"
 
 # Dedup decides whether a delivery is already here, so a message it cannot
 # read must never read as one that is not there: that would quietly
 # downgrade exactly-once to maybe-twice. It refuses and names the rm.
 if [ "$(id -u)" != 0 ]; then
-    chmod 000 "$(mbox m2)/messages/000000000000000001"
-    (pin m2 receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" &&
+    chmod 000 "$(mbox m2)/msg/000000000000000001"
+    (pin m2 drop <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" &&
         die "receive read an unreadable message as absent"
     grep -q "cannot hash message 1" "$ERR" || die "unreadable refusal text: $(cat "$ERR")"
     grep -q "to make it a gap" "$ERR" || die "unreadable refusal names the rm: $(cat "$ERR")"
-    chmod 600 "$(mbox m2)/messages/000000000000000001"
-    test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 2 || die "the refusal installed a copy"
+    chmod 600 "$(mbox m2)/msg/000000000000000001"
+    test "$(ls "$(mbox m2)/msg" | wc -l | tr -d ' ')" = 2 || die "the refusal installed a copy"
     ok "an unreadable message refuses the delivery instead of reading as absent"
 fi
 
@@ -1514,38 +1578,38 @@ b = bytearray(p.read_bytes())
 b[-10] ^= 0xFF
 p.write_bytes(bytes(b))
 "
-(pin m2 receive <"$HOME/tampered.mbeb") >"$OUT" 2>"$ERR" && die "tampered delivery accepted"
+(pin m2 drop <"$HOME/tampered.mbeb") >"$OUT" 2>"$ERR" && die "tampered delivery accepted"
 grep -q "verification failed" "$ERR" || die "tamper refusal text: $(cat "$ERR")"
 ok "tampered delivery: refused, nothing visible"
 
-head -c 100 "$HOME/note.mbeb" | (pin m2 receive) >"$OUT" 2>"$ERR" && die "truncated accepted"
+head -c 100 "$HOME/note.mbeb" | (pin m2 drop) >"$OUT" 2>"$ERR" && die "truncated accepted"
 grep -q "truncated" "$ERR" || die "truncation refusal text: $(cat "$ERR")"
 ok "truncated frame refused"
 
-{ cat "$HOME/note.mbeb"; printf 'extra'; } | (pin m2 receive) >"$OUT" 2>"$ERR" && die "trailing bytes accepted"
+{ cat "$HOME/note.mbeb"; printf 'extra'; } | (pin m2 drop) >"$OUT" 2>"$ERR" && die "trailing bytes accepted"
 grep -q "trailing" "$ERR" || die "trailing refusal text: $(cat "$ERR")"
-test "$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')" = 2 || die "trailing garbage installed a message"
+test "$(ls "$(mbox m2)/msg" | wc -l | tr -d ' ')" = 2 || die "trailing garbage installed a message"
 ok "trailing bytes refused, nothing installed"
 
 head -c 1048576 /dev/urandom >"$HOME/bin.body"
-(pin m1 pack "$M2" --subject "binary" <"$HOME/bin.body") | (pin m2 receive) >"$OUT" 2>"$ERR" || die "binary pipe failed"
+(pin m1 pack "$M2" --subject "binary" <"$HOME/bin.body") | (pin m2 drop) >"$OUT" 2>"$ERR" || die "binary pipe failed"
 (pin m2 read) >"$HOME/bin.out" 2>"$ERR" || die "read binary"
 cmp -s "$HOME/bin.body" "$HOME/bin.out" || die "binary body mismatch"
 ok "binary body round-trips through a pipe, byte-exact"
 
 # Idempotency spans exactly retained history: prune the original and the
 # same delivery installs anew.
-rm "$(mbox m2)/messages/000000000000000001" "$(mbox m2)/signatures/000000000000000001"
-(pin m2 receive <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "post-prune replay failed"
+rm "$(mbox m2)/msg/000000000000000001"
+(pin m2 drop <"$HOME/note.mbeb") >"$OUT" 2>"$ERR" || die "post-prune replay failed"
 grep -q "^beb: accepted 4 for " "$ERR" || die "post-prune ack: $(cat "$ERR")"
 ok "pruned then replayed: the mailbox remembers what it retains"
 
 # The dedup decision is atomic with insertion: 20 concurrent receives of
 # one fresh delivery converge to exactly one message.
 (pin m1 pack "$M2" --subject "race" --body "race payload") >"$HOME/race.mbeb" 2>/dev/null || die "pack race"
-before=$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')
+before=$(ls "$(mbox m2)/msg" | wc -l | tr -d ' ')
 for i in $(seq 1 20); do
-    (pin m2 receive <"$HOME/race.mbeb") >"$HOME/rc.$i.out" 2>"$HOME/rc.$i.err" &
+    (pin m2 drop <"$HOME/race.mbeb") >"$HOME/rc.$i.out" 2>"$HOME/rc.$i.err" &
 done
 wait
 fresh=0
@@ -1558,7 +1622,7 @@ for i in $(seq 1 20); do
 done
 test "$fresh" = 1 || die "concurrent receives: $fresh fresh installs, want 1"
 test "$already" = 19 || die "concurrent receives: $already already-acks, want 19"
-after=$(ls "$(mbox m2)/messages" | wc -l | tr -d ' ')
+after=$(ls "$(mbox m2)/msg" | wc -l | tr -d ' ')
 test $((after - before)) = 1 || die "concurrent receives installed $((after - before)) messages"
 ok "20 concurrent receives: one install, dedup atomic with insertion"
 
@@ -1579,10 +1643,10 @@ PB=$(mbox perm)
     die "send under umask 000: $(cat "$ERR")"
 test "$(mode "$SPOOL")" = 700 || die "spool root mode $(mode "$SPOOL"), want 700"
 test "$(mode "$PB")" = 700 || die "mailbox mode $(mode "$PB"), want 700"
-test "$(mode "$PB/messages")" = 700 || die "messages mode $(mode "$PB/messages"), want 700"
-test "$(mode "$PB/signatures")" = 700 || die "signatures mode $(mode "$PB/signatures"), want 700"
-test "$(mode "$PB/messages/000000000000000001")" = 600 || die "message mode $(mode "$PB/messages/000000000000000001"), want 600"
-test "$(mode "$PB/signatures/000000000000000001")" = 600 || die "signature mode $(mode "$PB/signatures/000000000000000001"), want 600"
+test "$(mode "$PB/msg")" = 700 || die "messages mode $(mode "$PB/msg"), want 700"
+
+test "$(mode "$PB/msg/000000000000000001")" = 600 || die "message mode $(mode "$PB/msg/000000000000000001"), want 600"
+
 test "$(mode "$PB/cursor")" = 600 || die "cursor mode $(mode "$PB/cursor"), want 600"
 test "$(mode "$W/perm/.beb")" = 700 || die ".beb mode $(mode "$W/perm/.beb"), want 700"
 ok "under umask 000 the spool is still 0700 dirs and 0600 files"

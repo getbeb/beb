@@ -81,7 +81,7 @@ export BEB_IDENTITY=$PWD/frontend
 echo "auth endpoint ready" | beb send backend --subject "endpoint ready"
 
 export BEB_IDENTITY=$PWD/backend
-beb list        # beb: cursor at 0; 1 total, 1 unread; showing 1
+beb list        # beb: cursor at 0; showing 1
                 # 1  now  endpoint ready  frontend
 beb read        # auth endpoint ready
 ```
@@ -95,7 +95,7 @@ wanders between subdirectories keeps signing as whoever it began as.
 
 ```console
 $ beb
-beb 0.8.0 delivers signed messages between identities.
+beb 0.9.0 delivers signed messages between identities.
 
   beb init NAME
       a new identity in this directory, and a name resolving to it
@@ -118,8 +118,12 @@ beb 0.8.0 delivers signed messages between identities.
 
   beb pack RECIPIENT --subject S [--body B]
       sign one delivery onto stdout
-  beb receive
+  beb drop
       install one delivery from stdin
+  beb pickup
+      hand over the oldest outbound delivery; the outbox keeps it
+  beb rm ID
+      remove one outbound delivery, once a carrier has it
 
   beb --help
       this list

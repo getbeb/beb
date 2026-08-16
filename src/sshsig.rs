@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -45,21 +45,44 @@ pub fn sign(private_key: &Path, file: &Path) -> Result<PathBuf, String> {
 /// passed. A pathname resolved a second time is a different question.
 /// The descriptor is rewound here and left wherever ssh-keygen stopped
 /// reading, so the caller seeks before using it again.
+/// Verify one frame's envelope against the signature stored beside it in
+/// the same file.
+///
+/// Both are slices now rather than whole files, so the envelope is piped
+/// to ssh-keygen instead of handed over as a descriptor, and the
+/// signature is written out to scratch because `-s` takes a path. What
+/// does not change is the property the caller depends on: the bytes
+/// verified and the bytes printed come from one open file, so nothing
+/// can be swapped underneath between the two.
 pub fn verify(
     message: &mut File,
-    signature: &Path,
+    env_off: u64,
+    env_len: u64,
+    sig_off: u64,
+    sig_len: u64,
     from_canonical: &str,
     tmp_root: &Path,
 ) -> Result<(), String> {
     let scratch = scratch_dir(tmp_root, "verify")?;
-    let verdict = verify_in(message, signature, from_canonical, &scratch);
+    let verdict = verify_in(
+        message,
+        env_off,
+        env_len,
+        sig_off,
+        sig_len,
+        from_canonical,
+        &scratch,
+    );
     let _ = fs::remove_dir_all(&scratch);
     verdict
 }
 
 fn verify_in(
     message: &mut File,
-    signature: &Path,
+    env_off: u64,
+    env_len: u64,
+    sig_off: u64,
+    sig_len: u64,
     from_canonical: &str,
     scratch: &Path,
 ) -> Result<(), String> {
@@ -67,21 +90,45 @@ fn verify_in(
     private_file(&allowed)
         .and_then(|mut f| f.write_all(format!("beb {from_canonical}\n").as_bytes()))
         .map_err(|e| format!("cannot write scratch file: {e}"))?;
+
+    let sig_path = scratch.join("sig");
     message
-        .seek(SeekFrom::Start(0))
-        .map_err(|e| format!("cannot rewind message: {e}"))?;
-    let stdin = message
-        .try_clone()
-        .map_err(|e| format!("cannot hand over the message: {e}"))?;
-    let out = Command::new("ssh-keygen")
+        .seek(SeekFrom::Start(sig_off))
+        .map_err(|e| format!("cannot seek to the signature: {e}"))?;
+    {
+        let mut out =
+            private_file(&sig_path).map_err(|e| format!("cannot write scratch file: {e}"))?;
+        let n = io::copy(&mut message.take(sig_len), &mut out)
+            .map_err(|e| format!("cannot read the signature: {e}"))?;
+        if n != sig_len {
+            return Err("the frame ends inside its signature".into());
+        }
+    }
+
+    message
+        .seek(SeekFrom::Start(env_off))
+        .map_err(|e| format!("cannot seek to the envelope: {e}"))?;
+    let mut child = Command::new("ssh-keygen")
         .args(["-Y", "verify", "-I", "beb", "-n", "beb", "-f"])
         .arg(&allowed)
         .arg("-s")
-        .arg(signature)
-        .stdin(Stdio::from(stdin))
+        .arg(&sig_path)
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
+        .map_err(|e| format!("cannot run ssh-keygen: {e}"))?;
+    {
+        // Dropped before the wait, or ssh-keygen never sees end of input.
+        let mut stdin = child.stdin.take().ok_or("cannot hand over the envelope")?;
+        let n = io::copy(&mut message.take(env_len), &mut stdin)
+            .map_err(|e| format!("cannot hand over the envelope: {e}"))?;
+        if n != env_len {
+            return Err("the frame ends inside its envelope".into());
+        }
+    }
+    let out = child
+        .wait_with_output()
         .map_err(|e| format!("cannot run ssh-keygen: {e}"))?;
     if !out.status.success() {
         return Err(one_line(&String::from_utf8_lossy(&out.stderr)));

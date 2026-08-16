@@ -49,8 +49,12 @@ beb {version} delivers signed messages between identities.
 
   beb pack RECIPIENT --subject S [--body B]
       sign one delivery onto stdout
-  beb receive
+  beb drop
       install one delivery from stdin
+  beb pickup
+      hand over the oldest outbound delivery; the outbox keeps it
+  beb rm ID
+      remove one outbound delivery, once a carrier has it
 
   beb --help
       this list
@@ -179,7 +183,16 @@ fn main() {
         Some("peek") => cmd_peek(&args[1..]),
         Some("wait") => cmd_wait(&args[1..]),
         Some("pack") => cmd_pack(&args[1..]),
-        Some("receive") => cmd_receive(&args[1..]),
+        Some("drop") => cmd_drop(&args[1..]),
+        Some("pickup") => cmd_pickup(&args[1..]),
+        Some("rm") => cmd_rm(&args[1..]),
+        // Renamed in 0.9.0. `receive` read as the recipient's act, and
+        // it never was: the process running it is the sender's, reaching
+        // across to put a delivery down. Its own help line already said
+        // "install one delivery from stdin" rather than use its name.
+        Some("receive") => Err(Fail::from(
+            "there is no receive; the verb is drop, and it takes the same stdin",
+        )),
         Some("whoami") => cmd_whoami(),
         Some("contacts") => cmd_contacts(&args[1..]),
         Some("--version") => {
@@ -449,7 +462,12 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
         };
         mb.ensure()?;
         mb.set_cursor(0)?;
-        let waiting = mb.ids().len();
+        // Mail addressed to this key before anybody here could read it
+        // sits in the outbox, queued to leave. It should not leave now:
+        // its recipient just moved in. A carrier that shipped it would
+        // be carrying mail away from the machine that can deliver it.
+        let taken = claim_from_outbox(&spool, &mb, &me.key.canonical())?;
+        let waiting = mb.window_after(0, usize::MAX).len();
         if !named_already {
             roster::append(&ks, &name, &me.key.canonical())?;
         }
@@ -459,7 +477,7 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
         }
         note(&format!(
             "claimed mailbox {} in {} for the {} already here, cursor at 0",
-            &util::sha256_hex(&me.key.canonical())[..8],
+            &key::mailbox_name(&me.key.canonical())[..8],
             util::pretty_path(&spool),
             shown(&beb)
         ));
@@ -467,8 +485,13 @@ fn cmd_init(args: &[String]) -> Result<(), Fail> {
         // have sent to this key before anybody could read it, and those
         // messages are all unread the moment a cursor exists.
         if waiting > 0 {
+            let from_outbox = if taken > 0 {
+                format!(", {taken} taken back from the outbox")
+            } else {
+                String::new()
+            };
             note(&format!(
-                "{waiting} already waiting; beb list shows them"
+                "{waiting} already waiting{from_outbox}; beb list shows them"
             ));
         }
         pin_note();
@@ -847,20 +870,31 @@ fn cmd_send(args: &[String]) -> Result<(), Fail> {
     let spool = util::spool_root()?;
     let mb = Mailbox::of(&spool, &to.canonical());
     let tmp = util::scratch_dir(&spool.join(".tmp"), "send")?;
+    // Where it lands is decided before it is signed, because the two
+    // destinations are different places, not two states of one place: a
+    // mailbox belongs to a reader on this machine, and the outbox holds
+    // what has to leave it.
+    let resident = mb.claimed();
     let result = write_signed_envelope(&me, &to, &out.subject, out.body.as_deref(), &tmp)
-        .and_then(|(env, sig, body)| mb.deliver(&env, &sig).map(|id| (id, body)));
+        .and_then(|(env, sig, body)| {
+            spool::assemble(&env, &sig)
+                .and_then(|f| {
+                    if resident {
+                        mb.deliver(&f)
+                    } else {
+                        spool::Outbox::at(&spool).put(&f)
+                    }
+                })
+                .map(|id| (id, body))
+        });
     let _ = fs::remove_dir_all(&tmp);
     let (id, body) = result?;
 
-    // Nothing on stdout. The delivery id is real, but it is an id in
-    // somebody else's mailbox: the sender cannot `peek` it, `read` it or
-    // prune it, because every one of those verbs works on the mailbox of
-    // the identity running them. Nor does a transport learn it here.
-    // beb-ssh's `carry` watches the spool and finds work by a message
-    // appearing in a mailbox with no cursor, so it discovers ids by
-    // listing a directory and never by reading this stdout. A number
-    // whose only consumer is a reader who cannot act on it is not an
-    // artifact, and a verb with nothing to capture writes nothing.
+    // Nothing on stdout either way. A delivered id belongs to somebody
+    // else's mailbox, which the sender cannot peek, read or prune. An
+    // outbox id is this machine's, but a carrier discovers it from
+    // `beb pickup` rather than by parsing a sentence. A number whose
+    // reader cannot act on it is not an artifact.
     let _ = id;
 
     // Two outcomes wore one sentence until 0.5.3. Delivery to a mailbox
@@ -874,7 +908,7 @@ fn cmd_send(args: &[String]) -> Result<(), Fail> {
     // defines: it belongs to whatever moves the bytes, which for beb-ssh
     // is beb-ssh's word. `pack` is in the help text with a description,
     // so it is a next step the reader can already look up.
-    if mb.claimed() {
+    if resident {
         // The recipient is named once, and never in subject position. An
         // unnamed one displays as 68 characters of base64, and
         // "ssh-ed25519 AAAA... reads it here" was read by an agent as the
@@ -897,10 +931,10 @@ fn cmd_send(args: &[String]) -> Result<(), Fail> {
         } else {
             full.clone()
         };
+        let _ = &arg;
         note(&format!(
-            "accepted for {display}; {body} bytes; nobody here reads it\n\
-             beb pack {arg} --subject \"{}\" writes a delivery you can carry to that machine",
-            out.subject
+            "accepted for {display}; {body} bytes; nobody here reads it, so it waits in the outbox as {id}\n\
+             a carrier takes it from there; beb pickup hands over the next one"
         ));
     }
     Ok(())
@@ -942,7 +976,17 @@ fn write_signed_envelope(
             body = io::copy(&mut io::stdin().lock(), &mut f)
                 .map_err(|e| format!("cannot write body: {e}"))?;
         }
-        f.sync_all().map_err(|e| format!("cannot sync envelope: {e}"))?;
+        // Not synced. This is a temp inside a scratch directory that is
+        // removed on every path out, read back a moment later by
+        // ssh-keygen and by the frame assembler, and referenced by
+        // nothing after that. A crash here loses a send that had not
+        // happened yet. Durability begins where the bytes become
+        // visible, which is the rename in `place`.
+        //
+        // It is not a cheap line to keep: on macOS Rust's sync_all is
+        // fcntl(F_FULLFSYNC), which waits for the drive to flush its
+        // write cache -- 3.4ms measured here, against 0.05ms for the
+        // fsync(2) that most software calls and believes is durable.
     }
     let sig_path = sshsig::sign(&me.private_key, &env_path)?;
     Ok((env_path, sig_path, body))
@@ -998,7 +1042,88 @@ fn cmd_pack(args: &[String]) -> Result<(), Fail> {
 /// a mailbox that already exists here is what makes that address a
 /// resident. Receiving is not reading, so nothing here needs a private
 /// key.
-fn cmd_receive(args: &[String]) -> Result<(), Fail> {
+/// pickup: the oldest outbound delivery, whole, on stdout.
+///
+/// Needs no identity. The outbox holds frames for keys that read
+/// elsewhere, and a carrier moving them is not any of them -- the same
+/// reason `drop` resolves nobody. It is also why there is no recipient
+/// argument: everything here is leaving, and a carrier on this machine
+/// carries all of it.
+///
+/// The frame goes to stdout and the two things a carrier needs to act --
+/// which id to remove afterwards, and who it is for -- go to stderr. So
+/// nothing that moves bytes has to parse a frame to route one, which is
+/// the whole reason this verb exists rather than a documented path.
+///
+/// It does not remove. A carrier that died mid-transfer must find the
+/// delivery still here; `rm` is the separate act that says it landed.
+fn cmd_pickup(args: &[String]) -> Result<(), Fail> {
+    if let Some(a) = args.first() {
+        return Err(format!("pickup takes nothing: beb pickup (got \"{a}\")").into());
+    }
+    let spool = util::spool_root()?;
+    let ob = spool::Outbox::at(&spool);
+    let id = match ob.ids().first().copied() {
+        Some(id) => id,
+        None => return Err(nothing("the outbox is empty; nothing is waiting to leave")),
+    };
+    let path = ob.path(id);
+    let mut f = File::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let (env_len, sig_len) = frame::read_header(&mut f)?;
+    let env_off = frame::header_len(env_len, sig_len);
+    f.seek(SeekFrom::Start(env_off))
+        .map_err(|e| format!("cannot seek: {e}"))?;
+    let h = envelope::read_headers_from(&mut f)
+        .map_err(|e| format!("outbound {id} is not a beb envelope ({e})"))?;
+    let lines = util::known_signers_path().map(|p| roster::load(&p)).unwrap_or_default();
+    let to = h.to.canonical();
+    let shown = roster::reverse(&lines, &to)
+        .map(str::to_string)
+        .unwrap_or_else(|| short_key(&to));
+    note(&format!(
+        "outbound {id} for {shown}; {} bytes; beb rm {id} once it has landed",
+        env_off + env_len + sig_len
+    ));
+    // The address, always, and not only when there is no name for it.
+    // A name is a local alias -- the reader's choice, absent for anyone
+    // unnamed -- and this line's consumer is a program deciding where to
+    // send bytes. It gets the one form that means the same thing on
+    // every machine, so a carrier never has to parse a frame to route
+    // one.
+    note(&format!("to {to}"));
+    f.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("cannot seek: {e}"))?;
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    io::copy(&mut f, &mut out).map_err(|e| format!("cannot write the frame: {e}"))?;
+    out.flush().map_err(|e| format!("cannot write the frame: {e}"))?;
+    Ok(())
+}
+
+/// rm: one outbound delivery, gone.
+///
+/// Separate from `pickup` on purpose. Custody belongs to whatever moves
+/// the bytes, so beb offers the removal and the carrier decides when --
+/// the same division as `read`, where beb moves the cursor and the
+/// caller decided to read.
+fn cmd_rm(args: &[String]) -> Result<(), Fail> {
+    let id = match args {
+        [one] => one
+            .parse::<u64>()
+            .map_err(|_| Fail::from(format!("not an outbound id: \"{one}\"")))?,
+        [] => return Err(Fail::from("rm needs an id: beb rm ID")),
+        _ => return Err(Fail::from("rm takes one id: beb rm ID")),
+    };
+    let ob = spool::Outbox::at(&util::spool_root()?);
+    if !ob.path(id).is_file() {
+        return Err(nothing(format!("no outbound {id}; beb pickup names what is waiting")));
+    }
+    ob.remove(id)?;
+    note(&format!("outbound {id} removed"));
+    Ok(())
+}
+
+fn cmd_drop(args: &[String]) -> Result<(), Fail> {
     if !args.is_empty() {
         return Err("receive takes nothing; the delivery arrives on stdin".into());
     }
@@ -1079,7 +1204,7 @@ fn receive_one(spool: &Path, tmp: &Path) -> Result<(spool::Delivered, Headers), 
     if !mailbox.claimed() {
         return Err(refused(format!(
             "no mailbox here for {}; its owner claims one with: beb init",
-            &util::sha256_hex(&h.to.canonical())[..8]
+            &key::mailbox_name(&h.to.canonical())[..8]
         )));
     }
 
@@ -1107,14 +1232,30 @@ fn receive_one(spool: &Path, tmp: &Path) -> Result<(spool::Delivered, Headers), 
         return Err(refused("trailing bytes after the frame; one frame is one delivery"));
     }
 
-    sshsig::verify(&mut env, &sig_path, &h.from.canonical(), &spool.join(".tmp"))
+    // Assembled before it is verified, and the assembled frame is what
+    // gets stored -- so the bytes checked and the bytes kept are the same
+    // file, not two arrangements of the same parts.
+    let frame_path = spool::assemble(&env_path, &sig_path)?;
+    let mut frame = fs::File::open(&frame_path)
+        .map_err(|e| format!("cannot open the assembled frame: {e}"))?;
+    let (env_len, sig_len) = crate::frame::read_header(&mut frame)?;
+    let env_off = crate::frame::header_len(env_len, sig_len);
+    sshsig::verify(
+        &mut frame,
+        env_off,
+        env_len,
+        env_off + env_len,
+        sig_len,
+        &h.from.canonical(),
+        &spool.join(".tmp"),
+    )
         .map_err(|e| refused(format!("signature verification failed ({e})")))?;
 
     // Idempotent over retained history, atomically: the dedup decision
     // and the insertion happen inside the mailbox lock, so concurrent
     // retries of the same delivery converge to one message.
     mailbox
-        .deliver_once(&env_path, &sig_path)
+        .deliver_once(&frame_path)
         .map(|d| (d, h))
         .map_err(Fail::from)
 }
@@ -1271,8 +1412,6 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     let mb = Mailbox::of(&util::spool_root()?, &me.key.canonical());
     claimed(&mb)?;
     let cursor = mb.cursor();
-    let ids = mb.ids();
-    let unread = ids.iter().filter(|&&id| id > cursor).count();
     let limit = match count {
         Some(0) => usize::MAX,
         Some(n) => n,
@@ -1289,15 +1428,12 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     // reads the same way every time and in the same direction `read`
     // hands messages over.
     let shown: Vec<u64> = match before {
-        Some(b) => {
-            let below: Vec<u64> = ids.iter().copied().filter(|&id| id < b).collect();
-            below[below.len().saturating_sub(limit)..].to_vec()
-        }
+        Some(b) => mb.window_before(b, limit),
         // No boundary is the cursor: unread, which is what `beb list`
         // has always meant.
         None => {
             let mark = after.unwrap_or(cursor);
-            ids.iter().copied().filter(|&id| id > mark).take(limit).collect()
+            mb.window_after(mark, limit)
         }
     };
 
@@ -1313,10 +1449,25 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     // so `beb list | wc -l` counts messages and not prose, and first
     // because a listing has no bound and a receipt behind an unbounded
     // artifact is the first thing a `head` throws away.
+    // No totals. "N total, M unread" cost a full directory read and a
+    // count of everything above the cursor -- 292ms on a 200k-message
+    // mailbox, paid on every listing, to print two numbers nobody acts
+    // on.
+    //
+    // But whether there is MORE has to stay, and in the header rather
+    // than only in the hint below it: a window that does not say it is a
+    // window reads as the whole, and an agent acts on a tenth of its
+    // mail believing it has seen all of it. A consumer that carries one
+    // line of what beb says -- claude-beb's drain carries the first --
+    // would otherwise carry the part that cannot tell the difference.
+    // It is one stat, not a count.
+    let more = shown
+        .last()
+        .is_some_and(|&last| mb.next_after(last).is_some());
     let header = format!(
-        "cursor at {cursor}; {} total, {unread} unread; showing {}",
-        ids.len(),
-        shown.len()
+        "cursor at {cursor}; showing {}{}",
+        shown.len(),
+        if more { ", more waiting" } else { "" }
     );
     if shown.is_empty() {
         // The header is the whole report, so it is the refusal's message
@@ -1336,10 +1487,10 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     // an offer to see the same rows again.
     let first = *shown.first().expect("shown is not empty here");
     let last = *shown.last().expect("shown is not empty here");
-    if ids.iter().any(|&id| id > last) {
+    if mb.next_after(last).is_some() {
         note(&format!("newer: beb list --after {last}"));
     }
-    if ids.iter().any(|&id| id < first) {
+    if mb.any_below(first) {
         note(&format!("older: beb list --before {first}"));
     }
 
@@ -1347,7 +1498,7 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     let now = util::now_secs()?;
     let rows: Vec<(u64, String, String, String)> = shown
         .into_iter()
-        .map(|id| match envelope::read_headers(&mb.message(id)) {
+        .map(|id| match frame_headers(&mb, id) {
             Ok(h) => {
                 let c = h.from.canonical();
                 let sender = roster::reverse(&lines, &c)
@@ -1380,6 +1531,46 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
             .map_err(|e| format!("cannot write: {e}"))?;
     }
     Ok(())
+}
+
+/// Frames in the outbox addressed to a key that has just claimed a
+/// mailbox here, moved into it.
+///
+/// Only `init` does this, and only when adopting: a freshly generated
+/// key cannot have been written to. What it fixes is the window where a
+/// `.beb` arrives after its mail did -- the mail was queued to leave
+/// because nobody read here yet, and now somebody does.
+fn claim_from_outbox(spool: &Path, mb: &Mailbox, mine: &str) -> Result<usize, String> {
+    let ob = spool::Outbox::at(spool);
+    let mut taken = 0;
+    for id in ob.ids() {
+        let path = ob.path(id);
+        let mut f = match File::open(&path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let Ok((env_len, sig_len)) = frame::read_header(&mut f) else {
+            continue;
+        };
+        if f.seek(SeekFrom::Start(frame::header_len(env_len, sig_len))).is_err() {
+            continue;
+        }
+        let Ok(h) = envelope::read_headers_from(&mut f) else {
+            continue;
+        };
+        if h.to.canonical() != mine {
+            continue;
+        }
+        // deliver renames it in, so the outbox entry is consumed by the
+        // move rather than deleted afterwards: one atomic step, and no
+        // window where the frame exists in both places or neither.
+        mb.deliver(&path)?;
+        taken += 1;
+    }
+    if taken > 0 {
+        util::fsync_dir(&ob.dir).map_err(|e| format!("cannot sync the outbox: {e}"))?;
+    }
+    Ok(taken)
 }
 
 /// How beb names a key nobody has named: the last eight characters of
@@ -1440,12 +1631,15 @@ fn name_hint(mb: &Mailbox, id: u64, h: &Headers) -> Option<String> {
     // still in the mailbox: anything below this id from the same key means
     // the offer was already made. The scan stops at the first match, so a
     // sender that writes often costs one envelope read.
-    if mb
-        .ids()
-        .into_iter()
-        .take_while(|&other| other < id)
+    // Walked backwards from just under this message, not forwards from
+    // the start: the nearest earlier message from the same sender is the
+    // one that decides, and it is usually one or two ids away. Walking
+    // up from 1 meant reading every envelope in the mailbox to answer a
+    // question about the last few.
+    if (1..id)
+        .rev()
         .any(|other| {
-            envelope::read_headers(&mb.message(other))
+            frame_headers(&mb, other)
                 .map(|prev| prev.from.canonical() == c)
                 .unwrap_or(false)
         })
@@ -1503,12 +1697,12 @@ fn cmd_read(args: &[String]) -> Result<(), Fail> {
     // a sender.
     let _lock = mb.read_lock()?;
     let cursor = mb.cursor();
-    match mb.ids().into_iter().find(|&id| id > cursor) {
+    match mb.next_after(cursor) {
         None => {
             Err(nothing(format!("no new mail; cursor at {cursor}")))
         }
         Some(id) => {
-            let (mut f, h) = check(&mb, id, &me)?;
+            let (mut f, body_off, body_end, h) = check(&mb, id, &me)?;
             // Everything beb has to say comes before the body, and
             // nothing comes after it. A body is raw and usually does not
             // end in a newline, so a line written behind one is glued to
@@ -1527,7 +1721,7 @@ fn cmd_read(args: &[String]) -> Result<(), Fail> {
             if let Some(hint) = name_hint(&mb, id, &h) {
                 note(&hint);
             }
-            print_body(&mut f, h.body_offset)?;
+            print_body(&mut f, body_off, body_end)?;
             mb.set_cursor(id).map_err(Fail::from)
         }
     }
@@ -1548,13 +1742,13 @@ fn cmd_peek(args: &[String]) -> Result<(), Fail> {
     let me = identity()?;
     let mb = Mailbox::of(&util::spool_root()?, &me.key.canonical());
     claimed(&mb)?;
-    if !mb.ids().contains(&id) {
+    if !mb.has(id) {
         return Err(format!(
             "no message {id}; beb list --after 0 --limit 0 shows what exists"
         )
         .into());
     }
-    let (mut f, h) = check(&mb, id, &me)?;
+    let (mut f, body_off, body_end, h) = check(&mb, id, &me)?;
     // The whole difference between this verb and `read`, said out loud.
     // Their outputs are the same bytes and their effects are not, and
     // for as long as neither said so a reader had to know which was
@@ -1564,7 +1758,7 @@ fn cmd_peek(args: &[String]) -> Result<(), Fail> {
     if let Some(hint) = name_hint(&mb, id, &h) {
         note(&hint);
     }
-    print_body(&mut f, h.body_offset).map_err(Fail::from)
+    print_body(&mut f, body_off, body_end).map_err(Fail::from)
 }
 
 /// Block until there is a message at or above a mark. The mark is the
@@ -1645,7 +1839,7 @@ fn cmd_wait(args: &[String]) -> Result<(), Fail> {
     // The same claim every reading verb needs: waiting on a mailbox
     // nobody claimed here is waiting on somebody else's outbound mail.
     claimed(&mb)?;
-    let messages = mb.messages();
+    let messages = mb.msgs();
 
     // The watch is armed before the first look either way, so an arrival
     // in between is caught by the loop's first scan rather than falling
@@ -1656,15 +1850,12 @@ fn cmd_wait(args: &[String]) -> Result<(), Fail> {
     let deadline = timeout.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
     let mut blocked = false;
     loop {
-        let ids = mb.ids();
-        // The mark a caller passes back: one past everything that exists,
-        // so the next wait fires only for something it has not seen. It
-        // is bounded and one line, so it goes first, the way `init`'s
-        // address does.
-        let next = ids.last().copied().unwrap_or(0) + 1;
-        if ids.iter().any(|&id| id >= mark) {
+        // The mark a caller passes back: one past everything assigned,
+        // which the counter already knows. It is bounded and one line,
+        // so it goes first, the way `init`'s address does.
+        let next = mb.high() + 1;
+        if mb.next_after(mark - 1).is_some() {
             let cursor = mb.cursor();
-            let unread = ids.iter().filter(|&&id| id > cursor).count();
             println!("{next}");
             // The receipt names the number, because an unlabelled one is
             // worse than none. An agent reading beb cold called the bare
@@ -1675,9 +1866,9 @@ fn cmd_wait(args: &[String]) -> Result<(), Fail> {
             // artifact beside it; this one printed a number and
             // explained nothing.
             note(&if blocked {
-                format!("mail arrived; {unread} unread; next mark {next}")
+                format!("mail arrived; next mark {next}")
             } else {
-                format!("{unread} unread; next mark {next}")
+                format!("mail is waiting; next mark {next}")
             });
             return Ok(());
         }
@@ -1726,14 +1917,17 @@ fn cmd_wait(args: &[String]) -> Result<(), Fail> {
 /// the one inode. Reopening a pathname after verifying it would leave the
 /// claim "what is printed is what was verified" resting on the path still
 /// meaning the same file.
-fn check(mb: &Mailbox, id: u64, me: &Identity) -> Result<(File, Headers), Fail> {
-    let mp = mb.message(id);
-    let sp = mb.signature(id);
-    let rm = format!("rm '{}' '{}'", mp.display(), sp.display());
-    let mut f = File::open(&mp)
-        .map_err(|e| refused(format!("message {id} cannot be opened ({e}); {rm} to make it a gap")))?;
+fn check(mb: &Mailbox, id: u64, me: &Identity) -> Result<(File, u64, u64, Headers), Fail> {
+    let mp = mb.msg(id);
+    let rm = format!("rm '{}'", mp.display());
+    let (mut f, env_off, env_len, sig_len) = mb
+        .open_frame(id)
+        .map_err(|e| refused(format!("message {id} is not a beb frame ({e}); {rm} to make it a gap")))?;
+    f.seek(SeekFrom::Start(env_off))
+        .map_err(|e| format!("cannot seek: {e}"))?;
     let h = envelope::read_headers_from(&mut f)
         .map_err(|e| refused(format!("message {id} is not a beb envelope ({e}); {rm} to make it a gap")))?;
+
     if !h.from.is_ed25519() || !h.to.is_ed25519() {
         return Err(refused(format!(
             "message {id} has a non-ed25519 key in its envelope; {rm} to make it a gap"
@@ -1744,15 +1938,30 @@ fn check(mb: &Mailbox, id: u64, me: &Identity) -> Result<(File, Headers), Fail> 
             "message {id} is addressed to someone else; {rm} to make it a gap"
         )));
     }
-    if !sp.is_file() {
-        return Err(refused(format!(
-            "message {id} has no signature; rm '{}' to make it a gap",
-            mp.display()
-        )));
-    }
-    sshsig::verify(&mut f, &sp, &h.from.canonical(), &util::spool_root()?.join(".tmp"))
-        .map_err(|e| refused(format!("message {id} failed verification ({e}); {rm} to make it a gap")))?;
-    Ok((f, h))
+    sshsig::verify(
+        &mut f,
+        env_off,
+        env_len,
+        env_off + env_len,
+        sig_len,
+        &h.from.canonical(),
+        &util::spool_root()?.join(".tmp"),
+    )
+    .map_err(|e| refused(format!("message {id} failed verification ({e}); {rm} to make it a gap")))?;
+    // Relative to the envelope, not the file: the header reader buffers,
+    // so where the descriptor happens to sit afterwards is not where the
+    // body starts. The envelope knows its own offset; the frame says
+    // where the envelope begins.
+    Ok((f, env_off + h.body_offset, env_off + env_len, h))
+}
+
+/// The envelope headers of a stored frame, for the verbs that describe a
+/// message without opening it: `list`, and `peek`'s look at its
+/// neighbours.
+fn frame_headers(mb: &Mailbox, id: u64) -> Result<Headers, String> {
+    let (mut f, env_off, _, _) = mb.open_frame(id)?;
+    f.seek(SeekFrom::Start(env_off)).map_err(|e| format!("cannot seek: {e}"))?;
+    envelope::read_headers_from(&mut f)
 }
 
 /// The body goes file -> stdout with io::copy; it never lands in memory
@@ -1766,8 +1975,10 @@ fn check(mb: &Mailbox, id: u64, me: &Identity) -> Result<(File, Headers), Fail> 
 /// carries binary bodies. So the line break goes to stderr, where
 /// everything beb adds already goes. It is a separator rather than
 /// speech, which is why it carries no `beb: `.
-fn print_body(f: &mut File, offset: u64) -> Result<(), String> {
-    let end = f.metadata().map_err(|e| format!("cannot stat: {e}"))?.len();
+fn print_body(f: &mut File, offset: u64, end: u64) -> Result<(), String> {
+    // The end is passed rather than measured: a body no longer runs to
+    // the end of its file, because the signature sits behind it in the
+    // same frame. Copying to EOF would print the signature too.
     let mut last = [0u8; 1];
     if end > offset {
         f.seek(SeekFrom::Start(end - 1))
@@ -1779,7 +1990,7 @@ fn print_body(f: &mut File, offset: u64) -> Result<(), String> {
         .map_err(|e| format!("cannot seek: {e}"))?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    io::copy(f, &mut out).map_err(|e| format!("cannot print body: {e}"))?;
+    io::copy(&mut f.take(end - offset), &mut out).map_err(|e| format!("cannot print body: {e}"))?;
     out.flush().map_err(|e| format!("cannot print body: {e}"))?;
     if end > offset && last[0] != b'\n' {
         let _ = writeln!(io::stderr());
