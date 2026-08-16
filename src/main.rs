@@ -51,10 +51,6 @@ beb {version} delivers signed messages between identities.
       sign one delivery onto stdout
   beb drop
       install one delivery from stdin
-  beb pickup
-      hand over the oldest outbound delivery; the outbox keeps it
-  beb rm ID
-      remove one outbound delivery, once a carrier has it
 
   beb --help
       this list
@@ -184,8 +180,6 @@ fn main() {
         Some("wait") => cmd_wait(&args[1..]),
         Some("pack") => cmd_pack(&args[1..]),
         Some("drop") => cmd_drop(&args[1..]),
-        Some("pickup") => cmd_pickup(&args[1..]),
-        Some("rm") => cmd_rm(&args[1..]),
         // Renamed in 0.9.0. `receive` read as the recipient's act, and
         // it never was: the process running it is the sender's, reaching
         // across to put a delivery down. Its own help line already said
@@ -882,7 +876,7 @@ fn cmd_send(args: &[String]) -> Result<(), Fail> {
                     if resident {
                         mb.deliver(&f)
                     } else {
-                        spool::Outbox::at(&spool).put(&f)
+                        spool::Outbox::at(&spool).put(&f, &key::mailbox_name(&to.canonical()))
                     }
                 })
                 .map(|id| (id, body))
@@ -934,7 +928,7 @@ fn cmd_send(args: &[String]) -> Result<(), Fail> {
         let _ = &arg;
         note(&format!(
             "accepted for {display}; {body} bytes; nobody here reads it, so it waits in the outbox as {id}\n\
-             a carrier takes it from there; beb pickup hands over the next one"
+             a carrier takes it from there; nothing else on this machine will"
         ));
     }
     Ok(())
@@ -1042,87 +1036,6 @@ fn cmd_pack(args: &[String]) -> Result<(), Fail> {
 /// a mailbox that already exists here is what makes that address a
 /// resident. Receiving is not reading, so nothing here needs a private
 /// key.
-/// pickup: the oldest outbound delivery, whole, on stdout.
-///
-/// Needs no identity. The outbox holds frames for keys that read
-/// elsewhere, and a carrier moving them is not any of them -- the same
-/// reason `drop` resolves nobody. It is also why there is no recipient
-/// argument: everything here is leaving, and a carrier on this machine
-/// carries all of it.
-///
-/// The frame goes to stdout and the two things a carrier needs to act --
-/// which id to remove afterwards, and who it is for -- go to stderr. So
-/// nothing that moves bytes has to parse a frame to route one, which is
-/// the whole reason this verb exists rather than a documented path.
-///
-/// It does not remove. A carrier that died mid-transfer must find the
-/// delivery still here; `rm` is the separate act that says it landed.
-fn cmd_pickup(args: &[String]) -> Result<(), Fail> {
-    if let Some(a) = args.first() {
-        return Err(format!("pickup takes nothing: beb pickup (got \"{a}\")").into());
-    }
-    let spool = util::spool_root()?;
-    let ob = spool::Outbox::at(&spool);
-    let id = match ob.ids().first().copied() {
-        Some(id) => id,
-        None => return Err(nothing("the outbox is empty; nothing is waiting to leave")),
-    };
-    let path = ob.path(id);
-    let mut f = File::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    let (env_len, sig_len) = frame::read_header(&mut f)?;
-    let env_off = frame::header_len(env_len, sig_len);
-    f.seek(SeekFrom::Start(env_off))
-        .map_err(|e| format!("cannot seek: {e}"))?;
-    let h = envelope::read_headers_from(&mut f)
-        .map_err(|e| format!("outbound {id} is not a beb envelope ({e})"))?;
-    let lines = util::known_signers_path().map(|p| roster::load(&p)).unwrap_or_default();
-    let to = h.to.canonical();
-    let shown = roster::reverse(&lines, &to)
-        .map(str::to_string)
-        .unwrap_or_else(|| short_key(&to));
-    note(&format!(
-        "outbound {id} for {shown}; {} bytes; beb rm {id} once it has landed",
-        env_off + env_len + sig_len
-    ));
-    // The address, always, and not only when there is no name for it.
-    // A name is a local alias -- the reader's choice, absent for anyone
-    // unnamed -- and this line's consumer is a program deciding where to
-    // send bytes. It gets the one form that means the same thing on
-    // every machine, so a carrier never has to parse a frame to route
-    // one.
-    note(&format!("to {to}"));
-    f.seek(SeekFrom::Start(0))
-        .map_err(|e| format!("cannot seek: {e}"))?;
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    io::copy(&mut f, &mut out).map_err(|e| format!("cannot write the frame: {e}"))?;
-    out.flush().map_err(|e| format!("cannot write the frame: {e}"))?;
-    Ok(())
-}
-
-/// rm: one outbound delivery, gone.
-///
-/// Separate from `pickup` on purpose. Custody belongs to whatever moves
-/// the bytes, so beb offers the removal and the carrier decides when --
-/// the same division as `read`, where beb moves the cursor and the
-/// caller decided to read.
-fn cmd_rm(args: &[String]) -> Result<(), Fail> {
-    let id = match args {
-        [one] => one
-            .parse::<u64>()
-            .map_err(|_| Fail::from(format!("not an outbound id: \"{one}\"")))?,
-        [] => return Err(Fail::from("rm needs an id: beb rm ID")),
-        _ => return Err(Fail::from("rm takes one id: beb rm ID")),
-    };
-    let ob = spool::Outbox::at(&util::spool_root()?);
-    if !ob.path(id).is_file() {
-        return Err(nothing(format!("no outbound {id}; beb pickup names what is waiting")));
-    }
-    ob.remove(id)?;
-    note(&format!("outbound {id} removed"));
-    Ok(())
-}
-
 fn cmd_drop(args: &[String]) -> Result<(), Fail> {
     if !args.is_empty() {
         return Err("receive takes nothing; the delivery arrives on stdin".into());
@@ -1542,23 +1455,10 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
 /// because nobody read here yet, and now somebody does.
 fn claim_from_outbox(spool: &Path, mb: &Mailbox, mine: &str) -> Result<usize, String> {
     let ob = spool::Outbox::at(spool);
+    let want = key::mailbox_name(mine);
     let mut taken = 0;
-    for id in ob.ids() {
-        let path = ob.path(id);
-        let mut f = match File::open(&path) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        let Ok((env_len, sig_len)) = frame::read_header(&mut f) else {
-            continue;
-        };
-        if f.seek(SeekFrom::Start(frame::header_len(env_len, sig_len))).is_err() {
-            continue;
-        }
-        let Ok(h) = envelope::read_headers_from(&mut f) else {
-            continue;
-        };
-        if h.to.canonical() != mine {
+    for (_, to, path) in ob.entries() {
+        if to != want {
             continue;
         }
         // deliver renames it in, so the outbox entry is consumed by the
@@ -1855,7 +1755,6 @@ fn cmd_wait(args: &[String]) -> Result<(), Fail> {
         // so it goes first, the way `init`'s address does.
         let next = mb.high() + 1;
         if mb.next_after(mark - 1).is_some() {
-            let cursor = mb.cursor();
             println!("{next}");
             // The receipt names the number, because an unlabelled one is
             // worse than none. An agent reading beb cold called the bare

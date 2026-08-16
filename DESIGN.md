@@ -507,7 +507,8 @@ this leans on are kernel guarantees network filesystems do not keep.
 A message for a key that reads on this machine goes into that key's
 mailbox. A message for a key that does not goes to
 
-    ~/.local/share/beb/outbox/000000000000000001
+    ~/.local/share/beb/outbox/000000000000000001-d811f21767d40b…756e
+                              └─ order ─────────┘ └─ who it is for ┘
 
 flat, one file, ids of its own. Not into a mailbox nobody claimed,
 which is where it went until 0.9.0.
@@ -538,18 +539,34 @@ away from the only machine that can deliver it.
     beb: 1 already waiting, 1 taken back from the outbox; beb list
          shows them
 
-A carrier moves what it finds with two verbs and no knowledge of the
-spool's shape:
+The name carries both things a carrier needs -- an id to take them in
+order, and the address to route them to -- so draining the outbox is a
+directory read and an unlink:
 
-    beb pickup            the oldest frame on stdout;
-                          its id and recipient on stderr
-    beb rm ID             once it has landed
+    for f in "$SPOOL"/outbox/0*; do
+        n=${f##*/}; to=${n#*-}
+        ship "$f" "$(route "$to")" && rm -f "$f"
+    done
 
-`pickup` names the recipient so that nothing which moves bytes has to
-parse a frame to route one. It does not remove: a carrier that dies
-mid-transfer must find the delivery still there, and `rm` is the
-separate act that says it landed. beb keeps no attempt counts and no
-notion of in-flight -- custody belongs to whatever moves the bytes.
+No beb process is involved, and nothing that moves bytes ever parses a
+frame. There were two verbs here until 0.9.0 -- `pickup` to hand the
+oldest frame over with its recipient, and `rm` to remove it once it
+landed -- and both existed only because the address was inside the
+frame, which is the one place a carrier must not look. Two verbs and
+two process spawns per message, to copy a field that could sit in the
+filename.
+
+The seam is a place rather than an interface, and the reason is the
+shape of what is on either side of it: **expose a place where the data
+is simple, and a verb where the rules are complex.** The outbox has no
+rules -- flat, complete frames, already signed and addressed. A
+mailbox has all of them, which is why arriving mail still goes through
+`drop`.
+
+Unlinking is the carrier's, not beb's. A carrier that dies mid-transfer
+finds the file still there and tries again; nothing here counts
+attempts or records what is in flight. Custody belongs to whatever
+moves the bytes, and so does the decision that it landed.
 
 ## Interface
 
@@ -576,10 +593,6 @@ notion of in-flight -- custody belongs to whatever moves the bytes.
         sign one delivery onto stdout
     beb drop
         install one delivery from stdin
-    beb pickup
-        hand over the oldest outbound delivery; the outbox keeps it
-    beb rm ID
-        remove one outbound delivery, once a carrier has it
 
     beb --help
         this list

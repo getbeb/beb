@@ -120,10 +120,6 @@ beb 0.9.0 delivers signed messages between identities.
       sign one delivery onto stdout
   beb drop
       install one delivery from stdin
-  beb pickup
-      hand over the oldest outbound delivery; the outbox keeps it
-  beb rm ID
-      remove one outbound delivery, once a carrier has it
 
   beb --help
       this list

@@ -477,7 +477,7 @@ ok "no short form appears anywhere in the help"
 "$BEB" --help >"$OUT" 2>/dev/null
 awk 'length($0) > 78 { print; found=1 } END { exit found }' "$OUT" ||
     die "a help line runs past 78 columns"
-test "$(grep -c '^  beb ' "$OUT")" = 14 || die "the help does not list 14 entries"
+test "$(grep -c '^  beb ' "$OUT")" = 12 || die "the help does not list 12 entries"
 # Every signature is followed by exactly one indented description.
 awk '/^  beb /{ want=1; next } want { if ($0 !~ /^      [^ ]/) { print NR": "$0; bad=1 } want=0 } END { exit bad }' "$OUT" ||
     die "a signature is not followed by an indented description"
@@ -580,36 +580,43 @@ grep -q 'nobody here reads it, so it waits in the outbox as [0-9]*$' "$ERR" ||
 # The next step is named in beb's own vocabulary. An agent learns this
 # tool from this tool, so a word for something beb neither implements
 # nor defines is a word it cannot look up.
-grep -q '^beb: a carrier takes it from there; beb pickup hands over the next one$' "$ERR" ||
-    die "the outbox ack does not name a verb beb has: $(cat "$ERR")"
-ok "a non-resident recipient sends to the outbox, and the ack names beb pickup"
+grep -q '^beb: a carrier takes it from there; nothing else on this machine will$' "$ERR" ||
+    die "the outbox ack does not say who moves it: $(cat "$ERR")"
+ok "a non-resident recipient sends to the outbox, and the ack says what happens next"
 
 # It never creates a mailbox for somebody who does not read here. That
 # is what makes a directory in the spool mean a reader lives here, which
 # is in turn what lets `drop` refuse a stranger.
 test -e "$SPOOL/$(keyhex "$S")" &&
     die "sending to a non-resident created a mailbox for them"
-test -f "$SPOOL/outbox/000000000000000001" ||
+test -f "$SPOOL/outbox/000000000000000001-$(keyhex "$S")" ||
     die "the delivery is not in the outbox: $(ls "$SPOOL/outbox" 2>&1)"
 ok "a mailbox in the spool means a reader here; outbound mail is not one"
 
-# The outbox hands it over whole, and keeps it until told otherwise.
-pin b pickup >"$HOME/out.mbeb" 2>"$ERR" || die "pickup: $(cat "$ERR")"
-grep -q '^beb: outbound 1 for ' "$ERR" || die "pickup does not name the id and recipient: $(cat "$ERR")"
-grep -q 'beb rm 1 once it has landed' "$ERR" || die "pickup does not name rm: $(cat "$ERR")"
-# The address, not the alias: a carrier routes on this, and a name is
-# local, the reader's, and missing for anyone unnamed.
-grep -q "^beb: to $S$" "$ERR" || die "pickup does not name the address: $(cat "$ERR")"
-head -c 4 "$HOME/out.mbeb" | grep -qx 'beb ' || die "pickup did not hand over a frame"
-test -f "$SPOOL/outbox/000000000000000001" || die "pickup removed what it handed over"
-ok "pickup hands over the oldest frame whole and keeps it"
+# The outbox is a place, not an interface. Everything a carrier needs is
+# in the name -- an id to order by and the address to route on -- so it
+# reads a directory and needs no beb process at all. That is why there
+# is no `pickup` and no `rm`: two verbs existed only because the
+# recipient was inside the frame, where a carrier must not look.
+OUT_ENTRY=$(ls "$SPOOL/outbox" | head -1)
+test -n "$OUT_ENTRY" || die "the outbox is empty"
+case "$OUT_ENTRY" in
+    000000000000000001-*) ;;
+    *) die "the outbox entry is not <id>-<recipient>: $OUT_ENTRY" ;;
+esac
+test "${OUT_ENTRY#*-}" = "$(keyhex "$S")" ||
+    die "the name does not carry the recipient: $OUT_ENTRY"
+head -c 4 "$SPOOL/outbox/$OUT_ENTRY" | grep -qx 'beb ' ||
+    die "the outbox entry is not a whole frame"
+ok "an outbox entry names its order and its recipient, and holds a whole frame"
 
-bx b rm 1 || die "rm: $(cat "$ERR")"
-grep -q 'outbound 1 removed' "$ERR" || die "rm ack: $(cat "$ERR")"
-test -e "$SPOOL/outbox/000000000000000001" && die "rm left the delivery behind"
-bx b pickup && die "pickup succeeded on an empty outbox"
-grep -q 'the outbox is empty' "$ERR" || die "empty pickup: $(cat "$ERR")"
-ok "rm removes one delivery; an empty outbox is nothing to do, not a failure"
+# A carrier ships it and unlinks it. No beb involved, and nothing beb
+# has to be asked for.
+"$BEB" drop <"$SPOOL/outbox/$OUT_ENTRY" >"$OUT" 2>"$ERR" &&
+    die "a frame for a key that reads elsewhere was installed here"
+rm -f "$SPOOL/outbox/$OUT_ENTRY"
+test -e "$SPOOL/outbox/$OUT_ENTRY" && die "the carrier could not remove what it shipped"
+ok "a carrier drains the outbox with readdir and unlink, and nothing else"
 
 bx b send "$B" --subject "note to self" --body "the body of the note" || die "send to self"
 grep -q '^beb: accepted for you; 20 bytes; it waits on this machine for beb read$' "$ERR" ||

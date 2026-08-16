@@ -131,23 +131,6 @@ impl Mailbox {
         !self.window_before(id, 1).is_empty()
     }
 
-    /// Delivery ids present, ascending. Tolerant: non-numeric names
-    /// (retention dotfiles, strays) are ignored.
-    ///
-    /// The last full scan left. Only `list` uses it, and only to count
-    /// what it cannot guess: how many messages a mailbox holds in total.
-    pub fn ids(&self) -> Vec<u64> {
-        let mut out: Vec<u64> = match fs::read_dir(self.msgs()) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse().ok()))
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        out.sort_unstable();
-        out
-    }
-
     pub fn cursor(&self) -> u64 {
         fs::read_to_string(self.dir.join("cursor"))
             .ok()
@@ -348,23 +331,32 @@ impl Outbox {
         }
     }
 
-    pub fn path(&self, id: u64) -> PathBuf {
-        self.dir.join(name(id))
-    }
-
-    pub fn ids(&self) -> Vec<u64> {
-        let mut out: Vec<u64> = match fs::read_dir(&self.dir) {
+    /// What is waiting to leave, oldest first: the id, the recipient,
+    /// and the file.
+    ///
+    /// The recipient is in the name, which is the whole reason a carrier
+    /// needs nothing from beb to drain this directory. It used to be
+    /// inside the frame only, so a carrier either parsed a frame -- the
+    /// one thing it must never do -- or asked beb to read it out, which
+    /// cost two process spawns per message to recover a field that could
+    /// have been in the filename all along.
+    pub fn entries(&self) -> Vec<(u64, String, PathBuf)> {
+        let mut out: Vec<(u64, String, PathBuf)> = match fs::read_dir(&self.dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse().ok()))
+                .filter_map(|e| {
+                    let n = e.file_name().to_str()?.to_string();
+                    let (id, to) = n.split_once('-')?;
+                    Some((id.parse().ok()?, to.to_string(), e.path()))
+                })
                 .collect(),
             Err(_) => Vec::new(),
         };
-        out.sort_unstable();
+        out.sort_unstable_by_key(|(id, _, _)| *id);
         out
     }
 
-    pub fn put(&self, frame: &Path) -> Result<u64, String> {
+    pub fn put(&self, frame: &Path, to: &str) -> Result<u64, String> {
         private_dir_all(&self.dir).map_err(|e| format!("cannot create the outbox: {e}"))?;
         let lock = OpenOptions::new()
             .create(true)
@@ -381,14 +373,8 @@ impl Outbox {
         let id = counter + 1;
         write_atomic(&counter_path, id.to_string().as_bytes())
             .map_err(|e| format!("cannot advance the outbox counter: {e}"))?;
-        place(frame, &self.path(id), &self.dir)?;
+        place(frame, &self.dir.join(format!("{}-{to}", name(id))), &self.dir)?;
         Ok(id)
-    }
-
-    pub fn remove(&self, id: u64) -> Result<(), String> {
-        let p = self.path(id);
-        fs::remove_file(&p).map_err(|e| format!("cannot remove {}: {e}", p.display()))?;
-        fsync_dir(&self.dir).map_err(|e| format!("cannot sync the outbox: {e}"))
     }
 }
 

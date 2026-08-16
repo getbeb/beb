@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
 
 use crate::key::{self, PublicKey};
 
@@ -80,10 +79,6 @@ pub fn compose(from: &str, to: &str, nonce: &str, date: &str, subject: &str) -> 
     format!("from: {from}\nto: {to}\nnonce: {nonce}\ndate: {date}\nsubject: {subject}\n\n")
 }
 
-pub fn read_headers(path: &Path) -> Result<Headers, String> {
-    let mut f = File::open(path).map_err(|e| format!("cannot open: {e}"))?;
-    read_headers_from(&mut f)
-}
 
 /// Headers from an open file, reading forward from wherever it stands.
 /// The descriptor stays the caller's, so a caller that verifies and then
