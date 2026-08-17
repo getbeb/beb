@@ -1,20 +1,22 @@
 name: site
 
-# getbeb.dev is this repo's gh-pages, so it is where the family's
-# installers live: one page, three scripts, each from its own repo.
+# getbeb.dev is this repo's gh-pages branch, published from site/ here
+# plus one installer from each repo in the family:
 #
 #   getbeb.dev/install.sh   beb
-#   getbeb.dev/depot.sh     beb-depot
 #   getbeb.dev/courier.sh   beb-courier
+#   getbeb.dev/depot.sh     beb-depot
 #
-# The sibling checkouts need those repos to be public, which is the same
-# thing curl | sh needs of their release assets.
+# The page used to live only on gh-pages, which is how it came to
+# advertise a program that no longer exists. It lives in main now, so it
+# changes in the same commit as the thing it describes.
 
 on:
   push:
     branches: [main]
-    paths: [install.sh]
-  # The other two live elsewhere, so their changes cannot trigger this.
+    paths: [install.sh, "site/**", ".github/workflows/site.yml"]
+  # The sibling installers live in other repos, so their changes cannot
+  # trigger this.
   workflow_dispatch:
 
 permissions:
@@ -42,15 +44,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: gh-pages
-          path: site
+          path: pages
       - run: |
-          cp main/install.sh site/install.sh
+          cp -r main/site/. pages/
+          cp main/install.sh pages/install.sh
           # Not "[ -f x ] && cp": a false test would end the step, since
           # Actions runs this under bash -e.
-          if [ -f depot/install.sh ]; then cp depot/install.sh site/depot.sh; fi
-          if [ -f courier/install.sh ]; then cp courier/install.sh site/courier.sh; fi
-          cd site
+          if [ -f depot/install.sh ]; then cp depot/install.sh pages/depot.sh; fi
+          if [ -f courier/install.sh ]; then cp courier/install.sh pages/courier.sh; fi
+          cd pages
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || { git commit -m "sync installers"; git push; }
+          git diff --cached --quiet || { git commit -m "sync site and installers"; git push; }
