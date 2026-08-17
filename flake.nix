@@ -13,7 +13,11 @@
         default = beb;
         beb = pkgs.rustPlatform.buildRustPackage {
           pname = "beb";
-          version = "0.5.2";
+          # From Cargo.toml, because a version written twice is a version
+          # that goes stale in one of the two places: this said 0.5.2
+          # through five releases, and nothing built from it was ever
+          # named what it was.
+          version = (nixpkgs.lib.importTOML ./Cargo.toml).package.version;
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
           # ssh-keygen: the test suite drives it at build time, the binary
