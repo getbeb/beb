@@ -142,4 +142,21 @@ ok "reading a mailbox costs the same at $SMALL messages and at $BIG"
 SMALL_STDIN=$W/dup.small.mbeb BIG_STDIN=$W/dup.big.mbeb check "drop (a duplicate)" drop
 ok "delivery costs the same at $SMALL messages and at $BIG"
 
+# The other axis: not how cost grows, but what a verb pays over the one
+# beside it. `read` is `peek` plus a cursor write, and both verify one
+# signature, so the difference between them is the cursor and nothing
+# else. Written with the drive barrier it was 15ms against peek's 7 --
+# one position costing more than the ssh-keygen that checks a signature.
+# Same principle as every check above: a ratio between two numbers taken
+# the same way on the same machine, never a threshold in milliseconds.
+echo 0 >"$XDG_DATA_HOME/beb/$(mbox big)/cursor"
+pk=$(ms big peek 1)
+echo 0 >"$XDG_DATA_HOME/beb/$(mbox big)/cursor"
+rd=$(ms big read)
+ratio=$(python3 -c "print('%.1f' % ($rd / max($pk, 0.001)))")
+printf '    %-22s %6sms peek, %8sms read  (%sx)\n' "cursor over peek" "$pk" "$rd" "$ratio"
+python3 -c "import sys; sys.exit(0 if $rd <= $pk * 1.6 else 1)" ||
+    die "read costs ${ratio}x peek; the cursor write is back on the drive barrier"
+ok "consuming a message costs about what looking at one costs"
+
 echo "all $n tests passed"

@@ -4,7 +4,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::util::{fsync_dir, private_dir_all, write_atomic, FILE_MODE};
+use crate::util::{fsync_dir, private_dir_all, write_atomic, write_atomic_no_barrier, FILE_MODE};
 
 /// How far back a duplicate is looked for, in ids.
 ///
@@ -171,8 +171,21 @@ impl Mailbox {
         self.dir.is_dir()
     }
 
+    /// Written atomically, and without the drive barrier.
+    ///
+    /// The barrier is what makes a delivery real, and the cursor is not a
+    /// delivery: it is a position over messages that are already durable.
+    /// Losing it to a power cut hands back an older position, so the next
+    /// `read` shows a message that was shown once before -- the same
+    /// outcome as the machine dying one instruction earlier, which the
+    /// cursor already has to survive. Nothing is lost that beb cannot say
+    /// again.
+    ///
+    /// It is not a small saving: `read` was 14.9ms and is 7.3ms, because
+    /// the two barriers behind one cursor write cost more than the
+    /// ssh-keygen that verifies the signature.
     pub fn set_cursor(&self, id: u64) -> Result<(), String> {
-        write_atomic(&self.dir.join("cursor"), id.to_string().as_bytes())
+        write_atomic_no_barrier(&self.dir.join("cursor"), id.to_string().as_bytes())
             .map_err(|e| format!("cannot write cursor: {e}"))
     }
 

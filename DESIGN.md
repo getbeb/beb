@@ -452,6 +452,25 @@ cache: 3.4ms measured, against 0.05ms for the `fsync(2)` that most
 software calls and believes is durable. Two redundant barriers were 27%
 of a send.
 
+Which makes where the barrier is *not* spent worth stating. The cursor
+is written atomically and without it. A barrier answers one question --
+can a power cut take this back -- and for a delivery the answer must be
+no, because the sender was told it arrived. The cursor is not a
+delivery. It is a position over messages that are already durable, so a
+power cut hands back an older position and the next `read` shows a
+message that was shown once before. That is the same outcome as the
+machine dying one instruction earlier, which the cursor has to survive
+in any case, and `read` prints from the mailbox rather than consuming
+out of it precisely so that saying a thing twice is cheap.
+
+The cost of getting this wrong was the larger half of a `read`: two
+barriers behind one cursor write, 15ms against the 7ms of everything
+else the verb does, including the `ssh-keygen` that checks the
+signature. It is 7.3ms now. `send` and `drop` are unchanged, and
+`tests/perf.sh` holds the line from the other side -- `read` is `peek`
+plus a cursor write, so if consuming stops costing about what looking
+costs, the barrier is back.
+
 Only beb writes messages. How it writes them is implementation, free
 to change: a per-mailbox flock, counter first, then the frame, each
 write-fsync-rename, so a crash leaves a gap in the numbering and never

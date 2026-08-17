@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 pub fn home() -> Result<PathBuf, String> {
@@ -298,20 +299,56 @@ pub fn fsync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
+/// `fsync(2)`, without the drive barrier `sync_all` carries on macOS.
+///
+/// The kernel hands the bytes to the device and does not wait for the
+/// device to flush its own write cache. A process that dies, a `kill
+/// -9`, a panic: all keep the write. Losing power keeps whatever the
+/// drive got around to. 3.52ms against 0.016ms measured here, which is
+/// the whole reason there is a choice to make.
+fn fsync_now(f: &File) -> io::Result<()> {
+    if unsafe { libc::fsync(f.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Replace a file's contents in one step: write a scratch file, sync it,
+/// rename it over the target, sync the directory. A reader sees the old
+/// bytes or the new ones and never a partial write, and after this
+/// returns the new ones survive the drive losing power.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_replace(path, bytes, |f| f.sync_all())
+}
+
+/// The same replacement, ordered but not barriered.
+///
+/// For state that a crash may lose without losing a message: what comes
+/// back is an older value of something beb recomputes, not a gap where
+/// a delivery was. The rename is still atomic, so the file is never
+/// half-written; only the wait for the drive's own cache is skipped.
+/// Nothing that decides whether a message exists may use this.
+pub fn write_atomic_no_barrier(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_replace(path, bytes, fsync_now)
+}
+
+fn write_replace(path: &Path, bytes: &[u8], sync: fn(&File) -> io::Result<()>) -> io::Result<()> {
     let dir = path.parent().expect("write_atomic path has a parent");
     let name = random_hex().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let tmp = dir.join(format!(".tmp-{name}"));
     {
         let mut f = private_file(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        sync(&f)?;
     }
     if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
-    fsync_dir(dir)
+    // The directory entry is synced the same way the file was: a barrier
+    // on one and not the other is a barrier on neither.
+    sync(&File::open(dir)?)
 }
 
 #[cfg(test)]
@@ -348,6 +385,42 @@ mod tests {
                 continue;
             }
             assert_eq!(b64_decode(&b64(data)).as_deref(), Some(data));
+        }
+    }
+
+    // Both replacements have to leave the same file behind: the barrier
+    // is a question about power loss, never about what a reader sees.
+    #[test]
+    fn write_atomic_both_ways_replace_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        for (name, write) in [
+            (
+                "barriered",
+                write_atomic as fn(&Path, &[u8]) -> io::Result<()>,
+            ),
+            ("plain", write_atomic_no_barrier),
+        ] {
+            let dir = std::env::temp_dir().join(format!("beb-wa-{}-{}", name, random_hex().unwrap()));
+            fs::create_dir(&dir).unwrap();
+            let p = dir.join("f");
+            write(&p, b"first").unwrap();
+            assert_eq!(fs::read(&p).unwrap(), b"first");
+            write(&p, b"second").unwrap();
+            assert_eq!(fs::read(&p).unwrap(), b"second", "{name} did not replace");
+            assert_eq!(
+                fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                FILE_MODE,
+                "{name} left the wrong mode"
+            );
+            // No scratch file survives either path.
+            let left: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n != "f")
+                .collect();
+            assert!(left.is_empty(), "{name} left {left:?}");
+            fs::remove_dir_all(&dir).unwrap();
         }
     }
 
