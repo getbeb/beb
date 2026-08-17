@@ -1,9 +1,21 @@
 name: site
 
+# getbeb.dev is this repo's gh-pages, so it is where the family's
+# installers live: one page, three scripts, each from its own repo.
+#
+#   getbeb.dev/install.sh   beb
+#   getbeb.dev/depot.sh     beb-depot
+#   getbeb.dev/courier.sh   beb-courier
+#
+# The sibling checkouts need those repos to be public, which is the same
+# thing curl | sh needs of their release assets.
+
 on:
   push:
     branches: [main]
     paths: [install.sh]
+  # The other two live elsewhere, so their changes cannot trigger this.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,14 +27,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: main
+      # Absent or private: publish what we have rather than failing, so
+      # continue-on-error belongs to the step and not to checkout's inputs.
+      - uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: getbeb/beb-depot
+          path: depot
+      - uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: getbeb/beb-courier
+          path: courier
       - uses: actions/checkout@v4
         with:
           ref: gh-pages
           path: site
       - run: |
           cp main/install.sh site/install.sh
+          # Not "[ -f x ] && cp": a false test would end the step, since
+          # Actions runs this under bash -e.
+          if [ -f depot/install.sh ]; then cp depot/install.sh site/depot.sh; fi
+          if [ -f courier/install.sh ]; then cp courier/install.sh site/courier.sh; fi
           cd site
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add install.sh
-          git diff --cached --quiet || { git commit -m "sync install.sh from main"; git push; }
+          git add -A
+          git diff --cached --quiet || { git commit -m "sync installers"; git push; }
