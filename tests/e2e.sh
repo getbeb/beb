@@ -6,6 +6,17 @@ set -u
 BEB=${BEB:?set BEB to the beb binary}
 case "$BEB" in /*) ;; *) BEB=$PWD/$BEB ;; esac
 
+# python3 names a mailbox from a key and assembles the frames three
+# tests corrupt on purpose. Gated here, and loudly, because without it
+# `keyhex` printed nothing and every path built from it pointed at
+# `$SPOOL//msg` -- so the first thing to go wrong announced itself forty
+# tests later as "no RFC3339 date header in the envelope", which is true
+# and about the wrong subject. A missing tool says it is missing.
+command -v python3 >/dev/null 2>&1 || {
+    echo "not ok - python3 is needed: mailbox names and planted frames are built with it"
+    exit 1
+}
+
 export HOME=$(mktemp -d)
 # BEB_IDENTITY too: the suite is run by people who use beb, and an
 # identity inherited from the caller's shell would answer for every

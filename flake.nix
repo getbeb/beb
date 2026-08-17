@@ -23,6 +23,10 @@
           # ssh-keygen: the test suite drives it at build time, the binary
           # drives it at runtime.
           nativeBuildInputs = [ pkgs.openssh pkgs.makeWrapper ];
+          # python3 names a mailbox from a key and assembles the frames
+          # three tests corrupt on purpose. Tests only -- beb never runs
+          # it -- so it stays out of the closure the binary carries.
+          nativeCheckInputs = [ pkgs.python3 ];
           postInstall = ''
             wrapProgram $out/bin/beb \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]}
