@@ -28,8 +28,18 @@ url=https://github.com/$REPO/releases/latest/download
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-curl -fsSL "$url/beb-$target" -o "$tmp/beb"
-curl -fsSL "$url/SHA256SUMS" -o "$tmp/SHA256SUMS"
+# curl's own 404 says nothing about what to do next, and this is the
+# first command a new user runs.
+fetch() {
+    curl -fsSL "$1" -o "$2" && return 0
+    echo "cannot download $1" >&2
+    echo "if there is no release for this platform yet, build from source:" >&2
+    echo "  cargo install --git https://github.com/$REPO" >&2
+    exit 1
+}
+
+fetch "$url/beb-$target" "$tmp/beb"
+fetch "$url/SHA256SUMS" "$tmp/SHA256SUMS"
 
 if command -v sha256sum >/dev/null 2>&1; then
     have=$(sha256sum "$tmp/beb" | awk '{print $1}')
