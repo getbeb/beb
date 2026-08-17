@@ -136,7 +136,7 @@ merged_is_stdout() {   # $1 label, rest: argv
         die "$label: 2>&1 | grep -v '^beb:' did not reconstruct stdout"
 }
 merged_is_stdout "whoami" pin um1 whoami
-merged_is_stdout "list"   pin um1 list
+merged_is_stdout "list"   pin um1 list --unread --limit 5
 merged_is_stdout "send"   pin um1 send "$UM2" --subject s --body b
 merged_is_stdout "wait"   pin um2 wait --timeout 0
 pin um2 read >/dev/null 2>&1
@@ -245,7 +245,7 @@ NID=$(addr namedid)
 mkid sender2 >/dev/null || die "init sender2"
 pin sender2 send namedid --subject "by name" --body x >/dev/null 2>&1 || die "send by name"
 pin sender2 send "$NID" --subject "by key" --body x >/dev/null 2>&1 || die "send by key"
-bx namedid list || die "list namedid"
+bx namedid list --unread --limit 5 || die "list namedid"
 test "$(grep -c 'by name\|by key' "$OUT")" = 2 ||
     die "name and key did not reach one mailbox: $(cat "$OUT")"
 ok "the name resolves to the address; the key still addresses it directly"
@@ -450,9 +450,9 @@ ok "send names every way the flags can be got wrong"
 # form somebody guesses anyway is answered with the one that works.
 bx b send a -s x -b y && die "-s accepted"
 grep -q 'send has no -s; the option is --subject' "$ERR" || die "-s refusal: $(cat "$ERR")"
-bx a list -f 1 && die "-f accepted"
+bx a list -f 1 --limit 5 && die "-f accepted"
 grep -q 'list has no -f; the option is --from' "$ERR" || die "-f refusal: $(cat "$ERR")"
-bx a list -n 2 && die "-n accepted"
+bx a list -n 2 --limit 5 && die "-n accepted"
 grep -q 'list has no -n; the option is --limit' "$ERR" || die "-n refusal: $(cat "$ERR")"
 bx a wait -t 1 && die "-t accepted"
 grep -q 'wait has no -t; the option is --timeout' "$ERR" || die "-t refusal: $(cat "$ERR")"
@@ -470,10 +470,10 @@ ok "no short form appears anywhere in the help"
 # short verbs across half a screen. It wrapped, on three of nine, which
 # left the eye no rhythm.
 #
-# `list` is the one entry with two description lines. Four facts about
-# its boundaries do not fit in one, and a cold reader handed the
-# one-line version answered "the exact command cannot be determined" to
-# both of the questions about digging back through old mail.
+# `list` is the one entry with three description lines. Which rows, which
+# direction, and that both are required do not fit in fewer, and a cold
+# reader handed the one-line version answered "the exact command cannot
+# be determined" to both of the questions about digging back.
 "$BEB" --help >"$OUT" 2>/dev/null
 awk 'length($0) > 78 { print; found=1 } END { exit found }' "$OUT" ||
     die "a help line runs past 78 columns"
@@ -481,14 +481,14 @@ test "$(grep -c '^  beb ' "$OUT")" = 12 || die "the help does not list 12 entrie
 # Every signature is followed by exactly one indented description.
 awk '/^  beb /{ want=1; next } want { if ($0 !~ /^      [^ ]/) { print NR": "$0; bad=1 } want=0 } END { exit bad }' "$OUT" ||
     die "a signature is not followed by an indented description"
-test "$(awk '/^  beb list /{f=1;next} /^  beb /{f=0} f&&/^      [^ ]/{n++} END{print n+0}' "$OUT")" = 2 ||
-    die "list should carry exactly two description lines"
+test "$(awk '/^  beb list /{f=1;next} /^  beb /{f=0} f&&/^      [^ ]/{n++} END{print n+0}' "$OUT")" = 3 ||
+    die "list should carry exactly three description lines"
 ok "every entry is a signature and one indented line, inside 78 columns"
 
 # Options stay inline in the signature, where a reader came to find
 # them, rather than being hinted at and looked up somewhere else.
 grep -q '^  beb send RECIPIENT --subject S \[--body B\]$' "$OUT" || die "send signature: $(grep '  beb send' "$OUT")"
-grep -q '^  beb list \[--after ID | --before ID\] \[--limit N\]$' "$OUT" || die "list signature: $(grep '  beb list' "$OUT")"
+grep -q '^  beb list (--unread | --after ID | --before ID) --limit N$' "$OUT" || die "list signature: $(grep '  beb list' "$OUT")"
 grep -q '^  beb wait \[--from ID\] \[--timeout SECS\]$' "$OUT" || die "wait signature: $(grep '  beb wait' "$OUT")"
 ok "every option appears inline in the signature that takes it"
 
@@ -557,7 +557,7 @@ ok "a date beb did not write is refused at the grammar, signature or not"
 
 # list shows how long ago the sender says it sent, and shows a clock
 # that is ahead as ahead rather than clamping it to zero.
-bx a list --after 0 --limit 0 || die "list for age"
+bx a list --after 0 --limit 50 || die "list for age"
 grep -qE '^[0-9]+  (now|[0-9]+[smhd])  ' "$OUT" || die "no age column: $(cat "$OUT")"
 ok "list carries an age column from the claimed date"
 
@@ -639,8 +639,10 @@ ok "key text must decode to a real ed25519 key"
 # column, while an unnamed sender is 68 characters of base64 in the form
 # `send` accepts, and a column of those would push every subject off the
 # screen. Titles are padded to the widest in the listing.
-bx a list || die "list"
-printf '1  now  endpoint ready  b\n2  now  schema          b\n3  now  deploy window   c\n4  now  raw key         b\n5  now  pub shaped      b\n' |
+bx a list --unread --limit 50 || die "list"
+# Newest first: a listing is read to find out what happened, and the
+# oldest rows of a full mailbox say nothing about what just arrived.
+printf '5  now  pub shaped      b\n4  now  raw key         b\n3  now  deploy window   c\n2  now  schema          b\n1  now  endpoint ready  b\n' |
     diff - "$OUT" >/dev/null || die "list content: $(cat "$OUT")"
 ok "list shows id, subject, sender in id order, subjects padded to a column"
 
@@ -656,7 +658,7 @@ HK=$(cat "$HOME/hk.out")
 mkid hr >/dev/null || die "init hr"
 HR=$(addr hr)
 pin hk send "$HR" --subject "unnamed sender" --body x >/dev/null 2>&1 || die "send from hk"
-bx hr list || die "list with an unnamed sender"
+bx hr list --unread --limit 50 || die "list with an unnamed sender"
 grep -q 'ssh-ed25519' "$OUT" && die "a listing printed a raw key: $(cat "$OUT")"
 grep -qE '  \.\.\.[A-Za-z0-9+/]{8}$' "$OUT" || die "no elided key in the row: $(cat "$OUT")"
 grep -q "\.\.\.${HK: -8}$" "$OUT" || die "the row's tail is not that sender's key: $(cat "$OUT")"
@@ -828,13 +830,14 @@ printf 'no trailing newline\n' | diff - "$OUT" >/dev/null ||
     die "a merged read did not un-merge to the body: $(od -c "$OUT" | head -3)"
 ok "a body with no trailing newline still un-merges: beb never speaks after the artifact"
 
-bx a list || die "list after consume"
-head -1 "$OUT" | grep -qE '^2 .* b$' || die "cursor did not advance"
+bx a list --unread --limit 50 || die "list after consume"
+grep -qE '^1  ' "$OUT" && die "cursor did not advance: a consumed id is still listed"
+tail -1 "$OUT" | grep -qE '^2 .* b$' || die "the oldest unread is not 2: $(tail -1 "$OUT")"
 ok "consume advances cursor"
 
 bx a peek 4 || die "peek 4"
 printf 'raw key send' | diff - "$OUT" >/dev/null || die "inspect body"
-bx a list || die "list after peek"
+bx a list --unread --limit 50 || die "list after peek"
 test "$(grep -c . "$OUT")" = 5 || die "inspect moved the cursor: $(cat "$OUT")"
 ok "inspect prints, cursor untouched"
 
@@ -865,8 +868,8 @@ grep -q "msg/000000000000000005" "$ERR" || die "refusal names the message file"
 test -s "$OUT" && die "refusal printed body bytes"
 ok "corrupt signature: refused before printing, rm named"
 
-bx a list || die "list after a refused read"
-head -1 "$OUT" | grep -q '^5  ' || die "cursor moved past bad message"
+bx a list --unread --limit 50 || die "list after a refused read"
+tail -1 "$OUT" | grep -q '^5  ' || die "cursor moved past bad message: $(tail -1 "$OUT")"
 ok "cursor unmoved by refusal"
 
 test -z "$(ls -A "$SPOOL/.tmp" 2>/dev/null)" || die "refusal left scratch litter: $(ls "$SPOOL/.tmp")"
@@ -903,41 +906,50 @@ ok "read takes no id and peek moves no cursor: the verb is the effect"
 # Absent, it was ambiguous between an old build, an empty listing and a
 # truncated read; on stdout it would corrupt `beb list | wc -l`; behind
 # the rows it is what a head or a display limit throws away first.
-bx a list --after 0 --limit 0 || die "full list"
-grep -q '^beb: cursor at [0-9]*; showing [0-9]*$' "$ERR" ||
+bx a list --after 0 --limit 50 || die "full list"
+grep -q '^beb: showing [0-9]*; cursor at [0-9]*' "$ERR" ||
     die "full list header: $(cat "$ERR")"
 grep -q 'cursor at' "$OUT" && die "the header landed on stdout, where it would be counted as a message"
 # Exit is 0 or 2 depending on whether anything was unread; the header
 # is printed either way, which is the whole point of it.
-bx a list
-grep -q '^beb: cursor at [0-9]*; showing [0-9]*$' "$ERR" || die "list header: $(cat "$ERR")"
+bx a list --unread --limit 50
+grep -q '^beb: showing [0-9]*; cursor at [0-9]*' "$ERR" || die "list header: $(cat "$ERR")"
 CUR_NOW=$(cat "$(mbox a)/cursor")
-grep -q "^beb: cursor at $CUR_NOW;" "$ERR" || die "the header does not state the real cursor: $(cat "$ERR")"
+grep -q "cursor at $CUR_NOW" "$ERR" || die "the header does not state the real cursor: $(cat "$ERR")"
 UNREAD=$(grep -c . "$OUT")
-grep -q "; showing $UNREAD$" "$ERR" || die "shown count disagrees with the rows: $(cat "$ERR")"
+grep -q "showing $UNREAD" "$ERR" || die "shown count disagrees with the rows: $(cat "$ERR")"
 ok "list states the cursor and the counts, on stderr, ahead of the rows"
 
 # The header must precede the listing in a merged stream, so a caller
 # who pipes both through head still learns where the cursor is.
-FIRST=$(pin a list --after 0 --limit 0 2>&1 | head -1)
-case "$FIRST" in "beb: cursor at "*) ;; *) die "merged list does not lead with the header: $FIRST" ;; esac
+FIRST=$(pin a list --after 0 --limit 50 2>&1 | head -1)
+case "$FIRST" in "beb: showing "*) ;; *) die "merged list does not lead with the header: $FIRST" ;; esac
 ok "a merged list leads with the header, so truncation cannot eat it"
 
-# A mailbox is unbounded and an agent's context is not, so an unpaged
-# listing is a flood waiting for the one morning nobody was reading.
-# The window runs forward from the cursor, the direction `read`
-# consumes in: a listing of the newest would show a tail while `read`
-# handed over the head, and the row acted on would not be one that was
-# seen.
+# A mailbox is unbounded and an agent's context is not, so a listing has
+# to be a window. It used to default to ten rows from the cursor, which
+# bounded the flood and hid the bound: a caller that never named a limit
+# has no reason to look for one, and read ten rows of twenty-five as the
+# whole mailbox. So the limit is required, and so is the direction --
+# --unread is the set the default used to mean without saying so, while
+# --after and --before reach mail already read.
 mkdir -p "$W/pg" && (cd "$W/pg" && "$BEB" init pg) >"$HOME/pg.out" 2>/dev/null || die "init pg"
 PG=$(cat "$HOME/pg.out")
 for i in $(seq 1 14); do bx a send "$PG" --subject "m$i" --body b || die "send m$i"; done
 env BEB_IDENTITY="$W/pg" "$BEB" read >/dev/null 2>&1 || die "read one"
 
-bx pg list || die "paged list"
-test "$(grep -c . "$OUT")" = 10 || die "default page is not 10 rows: $(grep -c . "$OUT")"
-head -1 "$OUT" | grep -q '^ *2  ' || die "the page does not start at the cursor: $(head -1 "$OUT")"
-grep -q '^beb: cursor at 1; showing 10, more waiting$' "$ERR" || die "paged header: $(cat "$ERR")"
+bx pg list && die "a listing with no selector and no limit was served"
+grep -q 'needs to say which' "$ERR" || die "bare list refusal: $(cat "$ERR")"
+bx pg list --unread && die "a listing with no limit was served"
+grep -q 'needs --limit' "$ERR" || die "missing-limit refusal: $(cat "$ERR")"
+ok "a listing says which rows and how many, or it is refused"
+
+bx pg list --unread --limit 10 || die "paged list"
+test "$(grep -c . "$OUT")" = 10 || die "--limit 10 gave $(grep -c . "$OUT") rows"
+head -1 "$OUT" | grep -q '^ *14  ' || die "the page does not start at the newest: $(head -1 "$OUT")"
+grep -q '^beb: showing 10, more; cursor at 1; read next is 2$' "$ERR" || die "paged header: $(cat "$ERR")"
+# Newest first, so the row `read` will hand over next is the one thing a
+# listing cannot show. The header names it.
 # A window that does not say it is a window reads as the whole. The
 # counts are gone -- they cost a full scan -- but "more waiting" is one
 # stat, and it is the part a consumer carrying a single line needs.
@@ -947,84 +959,95 @@ grep -q '^beb: cursor at 1; showing 10, more waiting$' "$ERR" || die "paged head
 # on. Where the window is, and whether there is more, are what a pager
 # needs, and the hints below say the second as a command.
 grep -q 'total' "$ERR" && die "the header still counts the whole mailbox"
-grep -q '^beb: newer: beb list --after 11$' "$ERR" || die "no newer hint: $(cat "$ERR")"
+# The unread view offers one direction. Its top row is the newest
+# message there is, so there is no "newer", and paging below the cursor
+# would leave the set that was asked for.
+grep -q '^beb: older: beb list --before 5 --limit 10$' "$ERR" || die "no older hint: $(cat "$ERR")"
+grep -q 'newer:' "$ERR" && die "the unread view offered to page above the newest message"
 ok "list pages from the cursor forward, says how many it showed, and names the next page"
 
 # The header is what makes a window safe to print: a paged listing that
 # did not say it was paged would read as the whole, and an agent would
 # act on a tenth of its mail believing it had seen all of it.
-bx pg list --limit 3 || die "list --limit 3"
-test "$(grep -c . "$OUT")" = 3 || die "-n 3 gave $(grep -c . "$OUT") rows"
-grep -q 'showing 3, more waiting$' "$ERR" || die "-n header: $(cat "$ERR")"
-ok "-n narrows the window and the header says how narrow"
+bx pg list --unread --limit 3 || die "list --limit 3"
+test "$(grep -c . "$OUT")" = 3 || die "--limit 3 gave $(grep -c . "$OUT") rows"
+grep -q 'showing 3, more' "$ERR" || die "limit header: $(cat "$ERR")"
+ok "--limit narrows the window and the header says how narrow"
 
 # An explicit -f is a request, not a filter, so already-read messages
 # are in range.
 bx pg list --after 0 --limit 2 || die "list --after 0"
-head -1 "$OUT" | grep -q '^1  ' || die "-f did not reach a consumed message: $(cat "$OUT")"
+tail -1 "$OUT" | grep -q '^1  ' || die "-f did not reach a consumed message: $(cat "$OUT")"
 ok "-f reaches back past the cursor into what was already read"
 
-bx pg list --limit 0 || die "list --limit 0"
-test "$(grep -c . "$OUT")" = 13 || die "-n 0 did not lift the limit: $(grep -c . "$OUT")"
-ok "-n 0 lifts the limit"
+# Zero was "no limit", which is the one count arithmetic can produce and
+# the one that returns the whole mailbox. Every other bad count refused;
+# this one was obeyed.
+bx pg list --unread --limit 0 && die "--limit 0 accepted"
+grep -q 'not a count: "0"' "$ERR" || die "--limit 0 refusal: $(cat "$ERR")"
+ok "--limit 0 is not a count, the way -1 and abc are not"
 
-bx pg list --after 999
+bx pg list --after 999 --limit 5
 test $? -eq 2 || die "a window past the end did not exit 2"
-grep -q 'showing 0$' "$ERR" || die "empty window header: $(cat "$ERR")"
+grep -q 'showing 0' "$ERR" || die "empty window header: $(cat "$ERR")"
 ok "a window past the end shows nothing and exits 2"
 
 # --all was a second way to say -f 1 -n 0, and it needed its own rule
 # for what it meant beside a window. The refusal names what replaced it.
-bx pg list --all && die "--all accepted"
-grep -q 'beb list --after 0 --limit 0 shows every message there is' "$ERR" ||
+bx pg list --all --limit 5 && die "--all accepted"
+grep -q 'page with --after 0 --limit N' "$ERR" ||
     die "--all refusal does not name its replacement: $(cat "$ERR")"
-bx pg list --before 0 && die "--before 0 accepted"
+bx pg list --before 0 --limit 5 && die "--before 0 accepted"
 grep -q 'not a message id: "0"' "$ERR" || die "-f 0 refusal: $(cat "$ERR")"
 bx pg list --after && die "--after with no value accepted"
 grep -q -- '--after needs an id' "$ERR" || die "dangling --after: $(cat "$ERR")"
-bx pg list --sideways && die "unknown list option accepted"
+bx pg list --sideways --limit 5 && die "unknown list option accepted"
 grep -q 'list has no option "--sideways"' "$ERR" || die "unknown list option: $(cat "$ERR")"
 # Exclusive cursors, so a caller pages by handing back an id it was just
 # shown: the last row to walk forward, the first row to walk back.
 # Nothing is computed, which is what makes gaps harmless -- `--from`
 # arithmetic returned 7 rows for a 10-row request the moment a carrier
 # had pruned three ids out of the range.
-bx pg list --limit 4 || die "first page"
-LAST=$(tail -1 "$OUT" | awk '{print $1}')
-FIRST=$(head -1 "$OUT" | awk '{print $1}')
+# Anchored at the start of the mailbox, because the unread view begins
+# at the newest and has nowhere forward to walk.
+bx pg list --after 0 --limit 4 || die "first page"
+LAST=$(head -1 "$OUT" | awk '{print $1}')
+FIRST=$(tail -1 "$OUT" | awk '{print $1}')
 bx pg list --after "$LAST" --limit 4 || die "--after next page"
 grep -qE "^ *$LAST  " "$OUT" && die "--after repeated the id it was given: $(cat "$OUT")"
-NEXT_FIRST=$(head -1 "$OUT" | awk '{print $1}')
+NEXT_FIRST=$(tail -1 "$OUT" | awk '{print $1}')
 test "$NEXT_FIRST" -gt "$LAST" || die "--after went backwards"
 ok "--after excludes its id and walks forward from a row you were shown"
 
 # Anchored where history exists: the sixth id in the mailbox always has
 # at least five below it.
-FIRST=$(pin pg list --after 0 --limit 0 2>/dev/null | sed -n '6p' | awk '{print $1}')
+FIRST=$(pin pg list --after 0 --limit 50 2>/dev/null | awk '{print $1}' | sort -n | sed -n '6p')
 bx pg list --before "$FIRST" --limit 4 || die "--before previous page"
 grep -qE "^ *$FIRST  " "$OUT" && die "--before repeated the id it was given"
-PREV_LAST=$(tail -1 "$OUT" | awk '{print $1}')
+PREV_LAST=$(head -1 "$OUT" | awk '{print $1}')
 test "$PREV_LAST" -lt "$FIRST" || die "--before went forwards"
 test "$(grep -c . "$OUT")" = 4 || die "--before gave $(grep -c . "$OUT") rows, want the 4 nearest"
 ok "--before excludes its id and takes the N nearest below it"
 
-# Rows print oldest first whichever end they came from: the boundary
+# Rows print newest first whichever end they came from: the boundary
 # chooses which rows, never their order.
-sort -n -c "$OUT" 2>/dev/null || die "a --before page did not print ascending"
-ok "a backward page still prints oldest first"
+sort -rn -c "$OUT" 2>/dev/null || die "a --before page did not print descending"
+ok "a backward page still prints newest first"
 
 # An exclusive cursor can name every interior boundary and neither end.
 # Ids start at 1, so --after 0 is the only way to say "from the start";
 # --before 0 names nothing and refuses.
 bx pg list --after 0 --limit 2 || die "--after 0"
-head -1 "$OUT" | grep -qE '^ *1  ' || die "--after 0 did not start at the beginning: $(cat "$OUT")"
-bx pg list --before 0 && die "--before 0 accepted"
+tail -1 "$OUT" | grep -qE '^ *1  ' || die "--after 0 did not reach the beginning: $(cat "$OUT")"
+bx pg list --before 0 --limit 5 && die "--before 0 accepted"
 grep -q 'not a message id: "0"' "$ERR" || die "--before 0 refusal: $(cat "$ERR")"
 ok "--after 0 names the start of the mailbox; --before 0 names nothing"
 
 bx pg list --after 5 --before 9 && die "two boundaries accepted"
-grep -q 'name opposite ends; use one' "$ERR" || die "two-boundary refusal: $(cat "$ERR")"
-bx pg list --from 1 && die "--from accepted"
+grep -q 'takes one of --unread, --after, --before' "$ERR" || die "two-boundary refusal: $(cat "$ERR")"
+bx pg list --unread --before 9 --limit 2 && die "--unread beside a boundary accepted"
+grep -q 'takes one of --unread, --after, --before' "$ERR" || die "mixed-selector refusal: $(cat "$ERR")"
+bx pg list --from 1 --limit 5 && die "--from accepted"
 grep -q 'list has no --from; --after ID pages forward and --before ID back' "$ERR" ||
     die "--from refusal does not name what replaced it: $(cat "$ERR")"
 ok "one boundary at a time, and --from names the pair that replaced it"
@@ -1033,11 +1056,12 @@ ok "one boundary at a time, and --from names the pair that replaced it"
 # nothing about how to move it, though the ids to move it with were in
 # the rows. An agent paging cold inferred both boundaries correctly and
 # still reported that the output did not tell it what to do next.
-bx pg list --limit 3 || die "paging hints"
-PG_LAST=$(grep -E '^ *[0-9]' "$OUT" | tail -1 | awk '{print $1}')
-PG_FIRST=$(grep -E '^ *[0-9]' "$OUT" | head -1 | awk '{print $1}')
-grep -q "^beb: newer: beb list --after $PG_LAST\$" "$ERR" || die "no forward hint: $(cat "$ERR")"
-grep -q "^beb: older: beb list --before $PG_FIRST\$" "$ERR" || die "no backward hint: $(cat "$ERR")"
+# A navigation window, which is the one that can offer both directions.
+bx pg list --before 9 --limit 3 || die "paging hints"
+PG_LAST=$(grep -E '^ *[0-9]' "$OUT" | head -1 | awk '{print $1}')
+PG_FIRST=$(grep -E '^ *[0-9]' "$OUT" | tail -1 | awk '{print $1}')
+grep -q "^beb: newer: beb list --after $PG_LAST --limit 3\$" "$ERR" || die "no forward hint: $(cat "$ERR")"
+grep -q "^beb: older: beb list --before $PG_FIRST --limit 3\$" "$ERR" || die "no backward hint: $(cat "$ERR")"
 # and the commands it prints run as printed
 eval "pin pg $(sed -n 's/^beb: newer: beb //p' "$ERR")" >/dev/null 2>&1 || die "the newer hint did not run"
 eval "pin pg $(sed -n 's/^beb: older: beb //p' "$ERR")" >/dev/null 2>&1 || die "the older hint did not run"
@@ -1045,7 +1069,7 @@ ok "list names both ways out of the window, and both commands run as printed"
 
 # Nothing to offer when the window is the whole mailbox: an offer to page
 # would be an offer to see the same rows again.
-bx pg list --after 0 --limit 0 || die "full listing"
+bx pg list --after 0 --limit 50 || die "full listing"
 grep -qE '^beb: (newer|older):' "$ERR" && die "offered to page a listing that showed everything: $(cat "$ERR")"
 ok "a listing that shows everything offers no paging"
 
@@ -1059,9 +1083,9 @@ test -n "$ADVICE" || die "peek refusal shape changed: $(cat "$ERR")"
 eval "pin pg ${ADVICE#beb }" >/dev/null 2>"$ERR" || die "the command peek names was refused: $(cat "$ERR")"
 ok "the listing peek points at is a command that runs"
 
-bx a list --after 0 --limit 0 || die "full list again"
+bx a list --after 0 --limit 50 || die "full list again"
 grep -qE '^1 .* b$' "$OUT" || die "--all hides consumed"
-bx a list
+bx a list --unread --limit 5
 test $? -eq 2 || die "a fully consumed mailbox did not list as nothing to do"
 test -s "$OUT" && die "default list shows consumed"
 ok "-f 1 -n 0 shows history, the default shows unread only"
@@ -1088,7 +1112,7 @@ bx d peek 90 && die "misaddressed message inspected"
 grep -q "someone else" "$ERR" || die "wrong-to inspect refusal"
 ok "inspect refuses it too"
 
-bx d list || die "list after a binding refusal"
+bx d list --unread --limit 50 || die "list after a binding refusal"
 grep -q '^90  ' "$OUT" || die "cursor advanced past misaddressed"
 ok "cursor unmoved by binding refusal"
 
@@ -1160,14 +1184,14 @@ while pin lp wait --timeout 4 >/dev/null 2>&1; do
 done
 wait
 test "$handled" = 2 || die "the worker loop handled $handled of 2 messages"
-pin lp list >"$OUT" 2>"$ERR"
-grep -q 'showing 0$' "$ERR" || die "the loop left mail unread: $(cat "$ERR")"
+pin lp list --unread --limit 50 >"$OUT" 2>"$ERR"
+grep -q 'showing 0;' "$ERR" || die "the loop left mail unread: $(cat "$ERR")"
 ok "while beb wait; do beb read; done drains without stalling"
 
 # --from names a mark of the caller's own, for a waiter that must not
 # fire again for mail it has already acted on. The cursor cannot serve:
 # it belongs to whoever runs `read`, and a doorbell never reads.
-LP_LAST=$(pin lp list --after 0 --limit 0 2>/dev/null | tail -1 | awk '{print $1}')
+LP_LAST=$(pin lp list --after 0 --limit 50 2>/dev/null | head -1 | awk '{print $1}')
 (pin lp wait --from "$LP_LAST" --timeout 1) >"$OUT" 2>"$ERR" ||
     die "--from at an existing id did not return"
 (pin lp wait --from $((LP_LAST + 1)) --timeout 1) >"$OUT" 2>"$ERR" &&

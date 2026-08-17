@@ -126,6 +126,25 @@ impl Mailbox {
         out
     }
 
+    /// The `limit` ids nearest below `before` that are still above
+    /// `floor`, ascending.
+    ///
+    /// `window_before` walks to the start of the mailbox; this stops at a
+    /// floor, which is what "the newest unread" needs: the cursor is the
+    /// floor, so the walk cannot fall into mail already read.
+    pub fn window_between(&self, floor: u64, before: u64, limit: usize) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut id = before;
+        while id > floor + 1 && out.len() < limit {
+            id -= 1;
+            if self.has(id) {
+                out.push(id);
+            }
+        }
+        out.reverse();
+        out
+    }
+
     /// Whether anything is still here below `id`, for a paging hint.
     pub fn any_below(&self, id: u64) -> bool {
         !self.window_before(id, 1).is_empty()

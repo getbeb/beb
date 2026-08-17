@@ -81,7 +81,8 @@ export BEB_IDENTITY=$PWD/frontend
 echo "auth endpoint ready" | beb send backend --subject "endpoint ready"
 
 export BEB_IDENTITY=$PWD/backend
-beb list        # beb: cursor at 0; showing 1
+beb list --unread --limit 5
+                # beb: showing 1; cursor at 0; read next is 1
                 # 1  now  endpoint ready  frontend
 beb read        # auth endpoint ready
 ```
@@ -95,7 +96,7 @@ wanders between subdirectories keeps signing as whoever it began as.
 
 ```console
 $ beb
-beb 0.9.0 delivers signed messages between identities.
+beb 0.10.0 delivers signed messages between identities.
 
   beb init NAME
       a new identity in this directory, and a name resolving to it
@@ -106,9 +107,10 @@ beb 0.9.0 delivers signed messages between identities.
 
   beb send RECIPIENT --subject S [--body B]
       sign and deliver; the body comes from --body or stdin
-  beb list [--after ID | --before ID] [--limit N]
-      read-only. unread, at most 10 rows, printed oldest first
-      --after/--before exclude ID, take the N nearest it, and reach read mail
+  beb list (--unread | --after ID | --before ID) --limit N
+      read-only, newest first. --unread is what you have not read;
+      --after/--before exclude ID, take the N nearest it, and reach
+      read mail. One of the three, and always a limit
   beb read
       the next unread message; moves the cursor past it
   beb peek ID

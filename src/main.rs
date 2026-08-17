@@ -37,9 +37,10 @@ beb {version} delivers signed messages between identities.
 
   beb send RECIPIENT --subject S [--body B]
       sign and deliver; the body comes from --body or stdin
-  beb list [--after ID | --before ID] [--limit N]
-      read-only. unread, at most 10 rows, printed oldest first
-      --after/--before exclude ID, take the N nearest it, and reach read mail
+  beb list (--unread | --after ID | --before ID) --limit N
+      read-only, newest first. --unread is what you have not read;
+      --after/--before exclude ID, take the N nearest it, and reach
+      read mail. One of the three, and always a limit
   beb read
       the next unread message; moves the cursor past it
   beb peek ID
@@ -1236,17 +1237,11 @@ fn age(claimed: i64, now: i64) -> String {
     format!("{sign}{n}{unit}")
 }
 
-/// How many rows `list` prints when nobody says otherwise. A mailbox is
-/// unbounded and an agent's context is not, so an unpaged listing is a
-/// flood waiting for the one morning somebody was away. Ten rows is
-/// under a kilobyte and still enough to scan; the header always says how
-/// many were not shown, so the window is never mistaken for the whole.
-const LIST_PAGE: usize = 10;
-
 fn cmd_list(args: &[String]) -> Result<(), Fail> {
-    const FORM: &str = "beb list [--after ID | --before ID] [--limit N]";
+    const FORM: &str = "beb list (--unread | --after ID | --before ID) --limit N";
     let mut after: Option<u64> = None;
     let mut before: Option<u64> = None;
+    let mut unread = false;
     let mut count: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
@@ -1279,11 +1274,21 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
                 );
                 i += 2;
             }
+            "--unread" => {
+                unread = true;
+                i += 1;
+            }
             "--limit" => {
                 let v = val("a count")?;
+                // Zero used to mean "no limit", which is the one count a
+                // caller can arrive at by arithmetic and the one that
+                // returns the whole mailbox. Every other bad count is
+                // refused; this one was obeyed.
                 count = Some(
                     v.parse::<usize>()
-                        .map_err(|_| Fail::from(format!("not a count: \"{v}\"")))?,
+                        .ok()
+                        .filter(|&n| n > 0)
+                        .ok_or_else(|| Fail::from(format!("not a count: \"{v}\"")))?,
                 );
                 i += 2;
             }
@@ -1292,7 +1297,7 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
             // caller typing either knows exactly what they want.
             "--all" => {
                 return Err(format!(
-                    "list has no --all; beb list --after 0 --limit 0 shows every message there is"
+                    "list has no --all; page with --after 0 --limit N, or ask for --unread\n{FORM}"
                 )
                 .into())
             }
@@ -1315,21 +1320,33 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
             }
         }
     }
-    // One boundary or none. Two would name a range, which is a different
-    // verb's worth of meaning than "the N nearest this id".
-    if after.is_some() && before.is_some() {
-        return Err(format!("--after and --before name opposite ends; use one: {FORM}").into());
+    // One selector, and it has to be said.
+    //
+    // The default used to be "unread from the cursor", which is a
+    // different *set* than --after and --before return, not a different
+    // window on the same one: those two reach mail already read. A caller
+    // who wrote neither got the unread set without asking for it, and a
+    // caller who wrote one got read mail without being told. Naming it is
+    // the whole fix.
+    let selectors = usize::from(unread) + usize::from(after.is_some()) + usize::from(before.is_some());
+    if selectors == 0 {
+        return Err(format!(
+            "list needs to say which: --unread, --after ID, or --before ID\n{FORM}"
+        )
+        .into());
     }
+    if selectors > 1 {
+        return Err(format!("list takes one of --unread, --after, --before: {FORM}").into());
+    }
+    // And how many. A page nobody asked for is a page nobody knows the
+    // size of: an agent that never named a limit has no reason to look
+    // for one, and reads ten rows of twenty-five as the whole mailbox.
+    let limit = count.ok_or_else(|| Fail::from(format!("list needs --limit N: {FORM}")))?;
 
     let me = identity()?;
     let mb = Mailbox::of(&util::spool_root()?, &me.key.canonical());
     claimed(&mb)?;
     let cursor = mb.cursor();
-    let limit = match count {
-        Some(0) => usize::MAX,
-        Some(n) => n,
-        None => LIST_PAGE,
-    };
 
     // Both cursors are exclusive, so a caller pages by handing back an id
     // it was just shown: the last row to walk forward, the first row to
@@ -1340,14 +1357,18 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     // The boundary chooses which rows, never their order, so a listing
     // reads the same way every time and in the same direction `read`
     // hands messages over.
-    let shown: Vec<u64> = match before {
-        Some(b) => mb.window_before(b, limit),
-        // No boundary is the cursor: unread, which is what `beb list`
-        // has always meant.
-        None => {
-            let mark = after.unwrap_or(cursor);
-            mb.window_after(mark, limit)
-        }
+    // Held ascending here whatever was asked for, because the hints and
+    // the "is there more" stat are both about the ends of the window.
+    // Only the printing is reversed.
+    let shown: Vec<u64> = match (unread, after, before) {
+        // The newest unread, not the oldest: a listing is read to find
+        // out what has happened, and the oldest ten of twenty-five say
+        // nothing about the one that just arrived. The cursor is the
+        // floor, so the walk cannot fall into mail already read.
+        (true, _, _) => mb.window_between(cursor, mb.high() + 1, limit),
+        (_, Some(a), _) => mb.window_after(a, limit),
+        (_, _, Some(b)) => mb.window_before(b, limit),
+        _ => unreachable!("a selector was required above"),
     };
 
     // Four facts, the same four every time: where the cursor is, how much
@@ -1374,13 +1395,34 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     // line of what beb says -- claude-beb's drain carries the first --
     // would otherwise carry the part that cannot tell the difference.
     // It is one stat, not a count.
-    let more = shown
-        .last()
-        .is_some_and(|&last| mb.next_after(last).is_some());
+    // "more" is about the direction being walked, and says only that:
+    // more rows that way. It used to read ", more waiting", which claims
+    // unread mail -- true of the old default view and false the moment a
+    // caller paged into read mail, where a fully-read mailbox would
+    // answer "showing 0" to one command and "more waiting" to the next.
+    // In the unread view "more" has to mean more *unread*: the rows stop
+    // at the cursor, so asking whether anything exists below the window
+    // answers with mail already read and offers to page into it.
+    let more = match (unread, after) {
+        (true, _) => shown
+            .first()
+            .is_some_and(|&f| !mb.window_between(cursor, f, 1).is_empty()),
+        (_, Some(_)) => shown.last().is_some_and(|&l| mb.next_after(l).is_some()),
+        _ => shown.first().is_some_and(|&f| mb.any_below(f)),
+    };
+    // What `read` would hand over is the one fact a listing cannot show
+    // once it is ordered newest first: the next row to be consumed is at
+    // the bottom, or off the page entirely. One stat, and omitted when
+    // there is nothing to read.
+    let next = mb.next_after(cursor);
     let header = format!(
-        "cursor at {cursor}; showing {}{}",
+        "showing {}{}; cursor at {cursor}{}",
         shown.len(),
-        if more { ", more waiting" } else { "" }
+        if more { ", more" } else { "" },
+        match next {
+            Some(r) => format!("; read next is {r}"),
+            None => String::new(),
+        }
     );
     if shown.is_empty() {
         // The header is the whole report, so it is the refusal's message
@@ -1400,11 +1442,24 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
     // an offer to see the same rows again.
     let first = *shown.first().expect("shown is not empty here");
     let last = *shown.last().expect("shown is not empty here");
-    if mb.next_after(last).is_some() {
-        note(&format!("newer: beb list --after {last}"));
-    }
-    if mb.any_below(first) {
-        note(&format!("older: beb list --before {first}"));
+    // The hints carry --limit too, so following one is a paste and stays
+    // as explicit as the command that produced it.
+    //
+    // The unread view offers only one direction, and only while there is
+    // unread left in it: its top row is the newest message there is, and
+    // an offer to page below the cursor is an offer to leave the set the
+    // caller asked for.
+    if unread {
+        if more {
+            note(&format!("older: beb list --before {first} --limit {limit}"));
+        }
+    } else {
+        if mb.next_after(last).is_some() {
+            note(&format!("newer: beb list --after {last} --limit {limit}"));
+        }
+        if mb.any_below(first) {
+            note(&format!("older: beb list --before {first} --limit {limit}"));
+        }
     }
 
     let lines = roster::load(&util::known_signers_path()?);
@@ -1437,7 +1492,11 @@ fn cmd_list(args: &[String]) -> Result<(), Fail> {
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    for (id, when, subject, sender) in rows {
+    // Newest first. The rows were gathered ascending because the window's
+    // ends are what the hints and the "more" stat are about; only the
+    // printing is reversed, so the thing that just arrived is the first
+    // line read rather than the tenth.
+    for (id, when, subject, sender) in rows.into_iter().rev() {
         let ap = " ".repeat(aw - when.chars().count());
         let tp = " ".repeat(tw - subject.chars().count());
         writeln!(out, "{id:>iw$}  {when}{ap}  {subject}{tp}  {sender}")
@@ -1644,7 +1703,7 @@ fn cmd_peek(args: &[String]) -> Result<(), Fail> {
     claimed(&mb)?;
     if !mb.has(id) {
         return Err(format!(
-            "no message {id}; beb list --after 0 --limit 0 shows what exists"
+            "no message {id}; beb list --after 0 --limit 50 shows what exists"
         )
         .into());
     }
