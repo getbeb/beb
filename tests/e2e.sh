@@ -575,8 +575,12 @@ mkdir -p "$W/stranger"
 S=$(cat "$HOME/s.out")
 rm -rf "$SPOOL/$(keyhex "$S")"
 bx b send "$S" --subject "into the void" --body "body for a stranger" || die "send to unclaimed"
-grep -q 'nobody here reads it, so it waits in the outbox as [0-9]*$' "$ERR" ||
+grep -q 'nobody here reads it, so it waits in the outbox$' "$ERR" ||
     die "send to a non-resident reads as local delivery: $(cat "$ERR")"
+# No id in it. The outbox counts separately from the mailbox, so a number
+# here reads as a mailbox id and names something else; nothing in beb
+# takes an outbox id, and what waits to leave is the carrier's to report.
+grep -qE 'outbox as [0-9]' "$ERR" && die "the ack still names an outbox id: $(cat "$ERR")"
 # The next step is named in beb's own vocabulary. An agent learns this
 # tool from this tool, so a word for something beb neither implements
 # nor defines is a word it cannot look up.

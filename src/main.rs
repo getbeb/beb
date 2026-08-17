@@ -928,7 +928,13 @@ fn cmd_send(args: &[String]) -> Result<(), Fail> {
         };
         let _ = &arg;
         note(&format!(
-            "accepted for {display}; {body} bytes; nobody here reads it, so it waits in the outbox as {id}\n\
+            // No id. The outbox keeps its own counter, so this number
+            // looked exactly like a mailbox id and named something else
+            // entirely -- an agent read "waits in the outbox as 14"
+            // beside a mailbox holding 9 and took them for one sequence.
+            // Nothing in beb takes an outbox id anyway: what is waiting
+            // to leave is the carrier's to report, and it does.
+            "accepted for {display}; {body} bytes; nobody here reads it, so it waits in the outbox\n\
              a carrier takes it from there; nothing else on this machine will"
         ));
     }
