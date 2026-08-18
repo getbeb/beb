@@ -46,10 +46,10 @@ mkdir backend frontend
 Each `init` creates a `.beb/` holding an ed25519 keypair, a mailbox,
 and a `.gitignore` that keeps the key out of your repo.
 
-An identity is that directory, and `BEB_IDENTITY` names it. Every verb
-but `init` reads it and nothing else: not the working directory, so
-`cd` moves the shell and never the signer. Set it once, wherever you
-decide such things:
+An identity is that directory, and `BEB_IDENTITY` names it. Anything
+that signs or reads takes it from there and nowhere else: not the
+working directory, so `cd` moves the shell and never the signer. Set it
+once, wherever you decide such things:
 
 ```sh
 export BEB_IDENTITY=$PWD/frontend
@@ -87,16 +87,26 @@ beb list --unread --limit 5
 beb read        # auth endpoint ready
 ```
 
-For a shell, direnv or a line in your profile pins it. For an agent,
-the harness does: [claude-beb](https://github.com/getbeb/claude-beb)
-pins the session's launch directory at start, so a session that
-wanders between subdirectories keeps signing as whoever it began as.
+For a shell, direnv or a line in your profile pins it. For an agent, the
+harness does.
+
+## Agents
+
+| harness | plugin | announce at turn end | wake an idle session |
+|---|---|---|---|
+| Claude Code | [claude-beb](https://github.com/getbeb/claude-beb) | yes | yes |
+| Codex | [codex-beb](https://github.com/getbeb/codex-beb) | yes | no |
+| pi | [pi-beb](https://github.com/getbeb/pi-beb) | yes | yes |
+
+Wake policy is handled by the agent's runtime plugins. As a rule,
+nothing interrupts mid-turn. Each pins `BEB_IDENTITY` at launch and
+announces mail without reading it.
 
 ## Commands
 
 ```console
 $ beb
-beb 0.10.0 delivers signed messages between identities.
+beb 0.11.0 delivers signed messages between identities.
 
   beb init NAME
       a new identity in this directory, and a name resolving to it
@@ -122,6 +132,8 @@ beb 0.10.0 delivers signed messages between identities.
       sign one delivery onto stdout
   beb drop
       install one delivery from stdin
+  beb sign NAMESPACE
+      sign stdin as this identity; the signature goes to stdout
 
   beb --help
       this list
@@ -130,10 +142,12 @@ beb 0.10.0 delivers signed messages between identities.
 
 Exit: 0 did it, 1 change the command, 2 nothing to do, 3 refused.
 
-BEB_IDENTITY names the directory holding the .beb to act as. Every verb
-requires it except init, which never reads it and always writes here:
+BEB_IDENTITY names the directory holding the .beb to act as. Anything
+that signs, reads, or is the identity needs one:
 
   export BEB_IDENTITY=/path/to/dir
+
+init, drop and contacts do not.
 ```
 
 `wait` blocks on a kernel watch rather than polling and returns as soon
@@ -145,7 +159,7 @@ while beb wait; do beb read | ./handle-job; done
 ```
 
 It waits from your cursor by default. A waiter that must not fire twice
-for the same mail — a doorbell that wakes a session, say — keeps its own
+for the same mail (a doorbell that wakes a session, say) keeps its own
 mark instead: `wait` prints the next mark on stdout, and `--from` takes
 it back.
 
@@ -158,18 +172,10 @@ done
 
 ## Design
 
-beb owns no network. `pack` writes a delivery to stdout, `drop`
-installs one from stdin, and whatever carries the bytes between them
-is your choice. [beb-courier](https://github.com/getbeb/beb-courier)
-and [beb-depot](https://github.com/getbeb/beb-depot) are one such pair,
-keeping custody the whole way across.
-
-`drop` authenticates the bytes, not the peer. It refuses a
-delivery for a mailbox that does not exist here before storing
-anything, so a stranger cannot spend your disk, but who may hand it a
-frame is the transport's question. Give it a transport that
-authenticates, such as an ssh command, rather than exposing it to
-arbitrary clients.
+beb owns no network: `pack` writes a delivery to stdout and `drop`
+installs one from stdin, and [beb-courier](https://github.com/getbeb/beb-courier)
+with [beb-depot](https://github.com/getbeb/beb-depot) are one pair that
+carries between them.
 
 [DESIGN.md](DESIGN.md) has the envelope format, the delivery
 guarantees, and what beb refuses to know.

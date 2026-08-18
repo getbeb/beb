@@ -52,6 +52,8 @@ beb {version} delivers signed messages between identities.
       sign one delivery onto stdout
   beb drop
       install one delivery from stdin
+  beb sign NAMESPACE
+      sign stdin as this identity; the signature goes to stdout
 
   beb --help
       this list
@@ -60,10 +62,12 @@ beb {version} delivers signed messages between identities.
 
 Exit: 0 did it, 1 change the command, 2 nothing to do, 3 refused.
 
-BEB_IDENTITY names the directory holding the .beb to act as. Every verb
-requires it except init, which never reads it and always writes here:
+BEB_IDENTITY names the directory holding the .beb to act as. Anything
+that signs, reads, or is the identity needs one:
 
-  export BEB_IDENTITY=/path/to/dir";
+  export BEB_IDENTITY=/path/to/dir
+
+init, drop and contacts do not.";
 
 /// The usage text names its own version: help that cannot say which
 /// binary printed it is help you have to go check.
@@ -180,6 +184,7 @@ fn main() {
         Some("peek") => cmd_peek(&args[1..]),
         Some("wait") => cmd_wait(&args[1..]),
         Some("pack") => cmd_pack(&args[1..]),
+        Some("sign") => cmd_sign(&args[1..]),
         Some("drop") => cmd_drop(&args[1..]),
         // Renamed in 0.9.0. `receive` read as the recipient's act, and
         // it never was: the process running it is the sender's, reaching
@@ -650,7 +655,17 @@ fn cmd_contacts(args: &[String]) -> Result<(), Fail> {
     if let Some(a) = args.first() {
         return Err(format!("contacts takes nothing: beb contacts (got \"{a}\")").into());
     }
-    let me = identity()?;
+    // Optional, and the only verb here where it is. The roster is one
+    // file per machine and says nothing about who you are: an identity
+    // is consulted to mark the row that is yours, which is worth having
+    // and not worth refusing over. Every other verb needs one to sign,
+    // to open a mailbox, or because it *is* the identity.
+    //
+    // It was refusing, and the reason to fix that rather than to let a
+    // directory resolve one is that the failures are not the same size.
+    // A missing pin here costs a line of annotation. A directory that
+    // resolves one costs a signature by somebody you did not choose.
+    let me = identity().ok();
     let path = util::known_signers_path()?;
     let lines = roster::load(&path);
     let pretty = util::pretty_path(&path);
@@ -659,7 +674,7 @@ fn cmd_contacts(args: &[String]) -> Result<(), Fail> {
             "no names in {pretty}; beb init NAME writes one, and read names a sender you can add"
         )));
     }
-    let mine = me.key.canonical();
+    let mine = me.as_ref().map(|m| m.key.canonical());
     // Only usable names set the column. An unusable line is reported on
     // stderr rather than printed, so letting its name widen the rows
     // would indent every pasteable line to fit one that is not there.
@@ -670,17 +685,18 @@ fn cmd_contacts(args: &[String]) -> Result<(), Fail> {
         .max()
         .unwrap_or(0);
     let usable = lines.iter().filter(|l| l.key.is_some()).count();
-    let self_name = roster::reverse(&lines, &mine).map(str::to_string);
-    match &self_name {
-        Some(n) => note(&format!(
-            "{usable} of {} names in {pretty}; {n} is this identity",
-            lines.len()
-        )),
-        None => note(&format!(
-            "{usable} of {} names in {pretty}; this identity is not among them",
-            lines.len()
-        )),
-    }
+    let self_name = mine
+        .as_deref()
+        .and_then(|m| roster::reverse(&lines, m))
+        .map(str::to_string);
+    let who = match (&me, &self_name) {
+        (Some(_), Some(n)) => format!("; {n} is this identity"),
+        (Some(_), None) => "; this identity is not among them".to_string(),
+        // Said, rather than left to be wondered about: the rows are the
+        // same either way, and only the marking is missing.
+        (None, _) => "; no identity here, so none is marked".to_string(),
+    };
+    note(&format!("{usable} of {} names in {pretty}{who}", lines.len()));
     let stdout = io::stdout();
     let mut out = stdout.lock();
     for l in &lines {
@@ -1034,6 +1050,53 @@ fn cmd_pack(args: &[String]) -> Result<(), Fail> {
         "packed for {display}, \"{}\"; {bytes}-byte delivery",
         out.subject
     ));
+    Ok(())
+}
+
+/// sign: stdin as this identity, in a namespace the caller names.
+///
+/// The one thing beb hides behind `BEB_IDENTITY` is where a private key
+/// lives, and this is that one thing as a verb. It is smaller than
+/// `pack`, which signs a delivery: this signs whatever it is handed and
+/// has no opinion about what the bytes mean.
+///
+/// The namespace is required rather than defaulted to `beb`, because a
+/// namespace is the whole of what stops a signature made for one purpose
+/// being presented as another, and a default would quietly put every
+/// caller in one bucket. beb's own envelopes use `beb`; nothing else
+/// should.
+///
+/// Nothing passes through this process. ssh-keygen reads the descriptor
+/// it was handed and writes the armoured signature to stdout, which is
+/// why an unbounded body costs nothing here.
+fn cmd_sign(args: &[String]) -> Result<(), Fail> {
+    let namespace = match args {
+        [n] if !n.is_empty() && !n.starts_with('-') => n.as_str(),
+        _ => {
+            return Err("sign takes the namespace to sign in: beb sign NAMESPACE\n\
+                        the bytes come from stdin and the signature goes to stdout"
+                .into())
+        }
+    };
+    let me = identity()?;
+    let out = std::process::Command::new("ssh-keygen")
+        .args(["-Y", "sign", "-n", namespace, "-f"])
+        .arg(&me.private_key)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| Fail::from(format!("cannot run ssh-keygen: {e}")))?;
+    if !out.status.success() {
+        return Err(format!(
+            "signing failed: {}",
+            util::one_line(&String::from_utf8_lossy(&out.stderr))
+        )
+        .into());
+    }
+    // ssh-keygen says "Signing data on standard input" on its own stderr
+    // and that line is not this program's to repeat.
+    note(&format!("signed in namespace {namespace}, as {}", me.source));
     Ok(())
 }
 

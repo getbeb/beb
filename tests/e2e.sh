@@ -101,7 +101,12 @@ grep -q 'BEB_IDENTITY' "$OUT" || die "--help never names the one variable every 
 # contradicted the init line three rows above, which an agent reading
 # the help cold reported as the most confusing message it met.
 grep -q 'reads BEB_IDENTITY' "$OUT" && die "--help still claims init does not read the pin"
-grep -q 'requires it except init' "$OUT" || die "--help does not say how init differs: $(cat "$OUT")"
+# It said every verb but init required one, which was wrong about drop
+# from the day drop existed, and wrong about contacts as of now. All
+# three are named, and none of them is explained: the verb list above
+# already says what each one does.
+grep -q 'init, drop and contacts do not' "$OUT" ||
+    die "--help does not name the verbs that need no pin: $(cat "$OUT")"
 grep -q '^beb: ' "$OUT" && die "--help prefixed the list it was asked for"
 test -s "$ERR" && die "--help wrote to stderr: $(cat "$ERR")"
 ok "--help is an artifact: stdout, unprefixed, exit 0"
@@ -488,7 +493,7 @@ ok "no short form appears anywhere in the help"
 "$BEB" --help >"$OUT" 2>/dev/null
 awk 'length($0) > 78 { print; found=1 } END { exit found }' "$OUT" ||
     die "a help line runs past 78 columns"
-test "$(grep -c '^  beb ' "$OUT")" = 12 || die "the help does not list 12 entries"
+test "$(grep -c '^  beb ' "$OUT")" = 13 || die "the help does not list 13 entries"
 # Every signature is followed by exactly one indented description.
 awk '/^  beb /{ want=1; next } want { if ($0 !~ /^      [^ ]/) { print NR": "$0; bad=1 } want=0 } END { exit bad }' "$OUT" ||
     die "a signature is not followed by an indented description"
@@ -1705,5 +1710,48 @@ head -c 33554432 /dev/urandom >"$BIG" || die "make 32MB body"
 (pin d read) >"$HOME/big.out" 2>"$ERR" || die "large read"
 cmp -s "$BIG" "$HOME/big.out" || die "large body mismatch"
 ok "32MB body round-trips byte-exact"
+
+# ---- sign: the one thing BEB_IDENTITY hides, as a verb -----------------
+
+printf 'claim these bytes' >"$HOME/claim"
+(pin a sign beb-collect <"$HOME/claim") >"$HOME/claim.sig" 2>"$ERR" || die "sign: $(cat "$ERR")"
+head -1 "$HOME/claim.sig" | grep -q 'BEGIN SSH SIGNATURE' || die "not an sshsig: $(cat "$HOME/claim.sig")"
+# Verified the way anything downstream would: an allowed_signers built
+# from the address alone, consulting no trust store.
+printf 'beb-collect %s\n' "$A" >"$HOME/allowed"
+ssh-keygen -Y verify -f "$HOME/allowed" -I beb-collect -n beb-collect \
+    -s "$HOME/claim.sig" <"$HOME/claim" >/dev/null 2>&1 ||
+    die "the signature does not verify against the address that made it"
+ok "sign signs stdin as this identity, and the address alone verifies it"
+
+# The namespace is the whole of what keeps one purpose's signature from
+# being presented as another's, so a default would be a hole with a name.
+ssh-keygen -Y verify -f "$HOME/allowed" -I beb-collect -n beb \
+    -s "$HOME/claim.sig" <"$HOME/claim" >/dev/null 2>&1 &&
+    die "a beb-collect signature verified as a beb one"
+ok "and only in the namespace it was asked for"
+
+(pin a sign) >"$OUT" 2>"$ERR" && die "sign took no namespace"
+grep -q 'beb sign NAMESPACE' "$ERR" || die "sign with no namespace: $(cat "$ERR")"
+ok "a namespace is required, and the refusal names the shape"
+
+# ---- contacts needs no identity ----------------------------------------
+#
+# The roster is one file per machine and says nothing about who you are.
+# An identity is consulted to mark the row that is yours, which is worth
+# having and was not worth refusing over: a missing pin cost a line of
+# annotation, and the alternative -- letting a directory resolve one --
+# costs a signature by somebody you did not choose.
+
+(cd "$W" && env -u BEB_IDENTITY "$BEB" contacts) >"$OUT" 2>"$ERR" ||
+    die "contacts with no identity: $(cat "$ERR")"
+grep -q '^a ' "$OUT" || die "the rows are missing without a pin: $(cat "$OUT")"
+grep -q 'no identity here, so none is marked' "$ERR" ||
+    die "it does not say why nothing is marked: $(cat "$ERR")"
+ok "contacts reads the roster with no identity, and says which part is missing"
+
+bx a contacts || die "contacts: $(cat "$ERR")"
+grep -q 'is this identity' "$ERR" || die "a pinned contacts marks nobody: $(cat "$ERR")"
+ok "and marks the row that is yours when there is one"
 
 echo "all $n tests passed"

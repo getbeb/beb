@@ -1196,6 +1196,33 @@ the nonce makes deliberate repeats distinct messages, and the
 signature stays outside, because any valid signature over the same
 bytes is the same message.
 
+## sign
+
+The one thing `BEB_IDENTITY` hides is where a private key lives, and
+`sign` is that one thing as a verb: bytes on stdin, an sshsig on stdout,
+signed by whoever the pin names.
+
+    $ echo "anything" | beb sign beb-collect
+    -----BEGIN SSH SIGNATURE-----
+
+It is smaller than `pack`, which signs a delivery and knows what a
+delivery is. This knows nothing about what it is handed, which is the
+point of having it: the alternative was every program downstream
+opening `$BEB_IDENTITY/.beb/id_ed25519` itself, and a transport that
+hardcodes beb's on-disk layout is a transport that breaks silently the
+next time beb changes. It has broken that way twice already.
+
+The namespace is required rather than defaulted. A namespace is the
+whole of what stops a signature made for one purpose being presented as
+another, so a default would put every caller in one bucket and call it
+convenience. beb's own envelopes are signed in `beb`; a collection claim
+is signed in `beb-collect`; neither can stand in for the other.
+
+It answers the design test below in the same way `pack` does. Delivering
+an authenticated message from one key to another is what beb is, and a
+key that can only sign the shapes beb already knows is a key beb is
+holding hostage.
+
 ## Out of scope
 
 Moving bytes between machines (`pack` emits and `drop` accepts;
