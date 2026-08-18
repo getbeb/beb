@@ -73,8 +73,8 @@ is the only thing in beb that writes to it, and it only ever appends.
 A name already taken is a refusal, not a second line.
 
 A name like `backend` is a local alias in `known_signers`. The key it
-resolves to is the identity, and that is what couriers route between
-machines.
+resolves to is the identity, and couriers route on that key, which they
+call an address.
 
 `beb contacts` reads it back in the file's own format, so a line can be
 pasted into someone else's:
