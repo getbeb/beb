@@ -12,6 +12,17 @@ $ BEB_IDENTITY=~/work/backend beb read
 auth endpoint ready
 ```
 
+```
+beb          signs, stores and reads mail on one machine
+beb-courier  carries it between machines
+beb-depot    holds it when two machines cannot reach each other
+
+identity ─ beb ─ courier ─────── courier ─ beb ─ identity
+                         \     /
+                          depot
+                        (optional)
+```
+
 ## Install
 
 ```sh
@@ -60,6 +71,10 @@ export BEB_IDENTITY=$PWD/frontend
 they can already address each other. That file is yours to edit; `init`
 is the only thing in beb that writes to it, and it only ever appends.
 A name already taken is a refusal, not a second line.
+
+A name like `backend` is a local alias in `known_signers`. The key it
+resolves to is the identity, and that is what couriers route between
+machines.
 
 `beb contacts` reads it back in the file's own format, so a line can be
 pasted into someone else's:
