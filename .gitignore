@@ -3,3 +3,7 @@
 /.direnv
 /.envrc
 /.claude/
+
+# the demo recording and its encode; the video lives on GitHub
+demo.mov
+demo.mp4

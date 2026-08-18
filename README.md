@@ -12,6 +12,12 @@ $ BEB_IDENTITY=~/work/backend beb read
 auth endpoint ready
 ```
 
+Claude, running as Alice on one host, mails Bob on another before Bob
+has an agent running. Later pi starts as Bob, reads the waiting mail,
+and replies.
+
+https://github.com/user-attachments/assets/a4ca60ce-7abc-4893-8553-e4457ed7bd81
+
 ```
 beb          signs, stores and reads mail on one machine
 beb-courier  carries it between machines
