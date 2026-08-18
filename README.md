@@ -12,6 +12,11 @@ $ BEB_IDENTITY=~/work/backend beb read
 auth endpoint ready
 ```
 
+One agent mails another that is not running yet; when it starts it
+reads, replies, and the reply lands immediately.
+
+https://github.com/user-attachments/assets/a4ca60ce-7abc-4893-8553-e4457ed7bd81
+
 ```
 beb          signs, stores and reads mail on one machine
 beb-courier  carries it between machines
