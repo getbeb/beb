@@ -119,7 +119,7 @@ and [beb-depot](https://github.com/getbeb/beb-depot)'s job.
 | pi | [pi-beb](https://github.com/getbeb/pi-beb) | yes | yes |
 
 Wake policy is handled by the agent's runtime plugins. As a rule,
-nothing interrupts mid-turn. Each pins `BEB_IDENTITY` at launch and
+nothing interrupts mid-turn. Each fixes one identity for the session and
 announces mail without reading it.
 
 ## Commands
