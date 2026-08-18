@@ -43,13 +43,14 @@ mkdir backend frontend
 (cd frontend && beb init frontend)
 ```
 
-Each `init` creates a `.beb/` holding an ed25519 keypair, a mailbox,
-and a `.gitignore` that keeps the key out of your repo.
+Each `init` creates a `.beb/` holding an ed25519 keypair and a
+`.gitignore` that keeps the key out of your repo, and claims that
+identity's mailbox in this machine's spool.
 
-An identity is that directory, and `BEB_IDENTITY` names it. Anything
-that signs or reads takes it from there and nowhere else: not the
-working directory, so `cd` moves the shell and never the signer. Set it
-once, wherever you decide such things:
+`BEB_IDENTITY` names that directory, and anything that signs or reads
+takes the key from there and nowhere else: not the working directory, so
+`cd` moves the shell and never the signer. Set it once, wherever you
+decide such things:
 
 ```sh
 export BEB_IDENTITY=$PWD/frontend
@@ -89,6 +90,10 @@ beb read        # auth endpoint ready
 
 For a shell, direnv or a line in your profile pins it. For an agent, the
 harness does.
+
+All of that is one machine. beb owns no network, so carrying mail
+between machines is [beb-courier](https://github.com/getbeb/beb-courier)
+and [beb-depot](https://github.com/getbeb/beb-depot)'s job.
 
 ## Agents
 
