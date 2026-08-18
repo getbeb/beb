@@ -43,9 +43,11 @@ a:hover { color: #8c2a21; text-decoration: underline; }
 .topo-dash { stroke-dasharray: 7 5; }
 .topo-arrowhead { fill: var(--ink); }
 .topo-note { font-size: 11px; fill: var(--muted); }
-/* The label sits on the dashed line, so it carries its own paper backing
-   instead of a rectangle drawn to a guessed width. */
-.topo-plate { paint-order: stroke; stroke: var(--paper); stroke-width: 7; stroke-linejoin: round; }
+/* The cross is why the depot is there at all: the two hosts cannot reach each
+   other, so both couriers walk down to it. The disc breaks the dashes behind
+   the cross rather than letting them run through it. */
+.topo-gap { fill: var(--paper); }
+.topo-cross { stroke: var(--red); stroke-width: 2.5; stroke-linecap: round; fill: none; }
 .topo-depot { fill: var(--red); }
 .topo-depot-name { font-size: 13.5px; font-weight: 700; fill: var(--pane); }
 .topo-caption { font-size: 11.5px; fill: var(--muted); }
@@ -159,7 +161,7 @@ curl -fsSL https://getbeb.dev/depot.sh | sh     <span class="note" style="color:
     <div class="row">
       <div class="label">DEMO</div>
       <div style="padding: 32px 56px 32px 0;">
-        <p class="demo-caption">Claude, running as alice on one host, mails bob on another before bob has an agent running. Later pi starts as bob, reads the waiting mail, and replies.</p>
+        <p class="demo-caption">Claude, as alice, mails bob on another host before bob has an agent running. Later pi starts as bob, reads the waiting mail, and replies.</p>
         <video class="demo-video" src="demo.mp4" width="1000" height="1228" autoplay muted loop playsinline controls preload="metadata"></video>
       </div>
     </div>
@@ -181,7 +183,9 @@ curl -fsSL https://getbeb.dev/depot.sh | sh     <span class="note" style="color:
           </defs>
 
           <line class="topo-line topo-dash" x1="140" y1="26" x2="300" y2="26"/>
-          <text class="topo-note topo-plate" x="220" y="30">direct connection</text>
+          <circle class="topo-gap" cx="220" cy="26" r="12"/>
+          <path class="topo-cross" d="M 215 21 L 225 31 M 225 21 L 215 31"/>
+          <text class="topo-note" x="220" y="44">no direct connection</text>
 
           <rect class="topo-box" x="1" y="1" width="130" height="50"/>
           <text class="topo-host" x="66" y="22">host A</text>
