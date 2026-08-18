@@ -1,11 +1,236 @@
 <!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>beb</title>
-<h1>beb</h1>
-<p>Signed mail for autonomous processes.</p>
-<pre>curl -fsSL https://getbeb.dev/install.sh | sh      # beb, on each machine
-curl -fsSL https://getbeb.dev/courier.sh | sh      # beb-courier, carries it between them
-curl -fsSL https://getbeb.dev/depot.sh | sh        # beb-depot, where it waits in between</pre>
-<p><a href="https://github.com/getbeb/beb">beb</a>
- &middot; <a href="https://github.com/getbeb/beb-courier">beb-courier</a>
- &middot; <a href="https://github.com/getbeb/beb-depot">beb-depot</a></p>
+<meta name="description" content="Signed mail for autonomous processes. An identity is an SSH key, a message is signed bytes, a mailbox is a directory.">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root { --ink: #33291c; --paper: #e9dcc4; --desk: #d8cdb8; --pane: #f4ecdb; --rule: #c8b999; --faint: #8a7a5c; --muted: #6a5c42; --red: #b3372c; --blue: #3a5486; --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+body { margin: 0; background: var(--desk); font-family: 'Spectral', Georgia, serif; padding: 48px 24px; }
+a { color: var(--red); text-decoration: none; }
+a:hover { color: #8c2a21; text-decoration: underline; }
+
+.sheet { position: relative; max-width: 880px; margin: 0 auto; }
+/* minmax(0, 1fr) and never a bare 1fr: a grid column's min-width is auto,
+   so the 440px diagram further down became the floor for the whole sheet
+   and pushed the card wider than the phone it was being read on. */
+.row { display: grid; grid-template-columns: 150px minmax(0, 1fr); border-bottom: 1px solid var(--rule); }
+.facts { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border-bottom: 1px solid var(--rule); }
+.label { padding: 32px 0 32px 56px; font-family: var(--mono); font-size: 12px; letter-spacing: 2px; color: var(--faint); }
+.tape { height: 10px; background: repeating-linear-gradient(45deg, var(--red) 0 16px, var(--paper) 16px 32px, var(--blue) 32px 48px, var(--paper) 48px 64px); }
+.wordmark { display: flex; align-items: baseline; font-family: var(--mono); font-size: 96px; font-weight: 700; letter-spacing: -4px; color: var(--ink); line-height: 1; }
+.wordmark .o { width: 53px; height: 53px; border-radius: 50%; background: var(--red); color: var(--paper); display: grid; place-items: center; font-size: 42px; letter-spacing: 0; align-self: flex-end; margin: 0 3px 11px 6px; padding: 0 0 7px 2px; }
+
+@keyframes caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@keyframes walk-a { 0%, 5% { left: 16px; } 28%, 34% { left: calc(100% - 18px); } 56%, 100% { left: 16px; } }
+@keyframes walk-b { 0%, 38% { left: calc(100% - 30px); } 58%, 64% { left: 4px; } 88%, 100% { left: calc(100% - 30px); } }
+@keyframes parcel-a { 0%, 27.5% { opacity: 1; } 28%, 100% { opacity: 0; } }
+@keyframes throw-x { 0%, 27.5% { transform: translateX(0); opacity: 0; } 28% { transform: translateX(0); opacity: 1; } 33% { transform: translateX(47px); opacity: 1; } 33.5%, 100% { transform: translateX(47px); opacity: 0; } }
+@keyframes throw-y { 0%, 28% { transform: translateY(0); } 30.5% { transform: translateY(-14px); } 33%, 100% { transform: translateY(10px); } }
+@keyframes parcel-depot { 0%, 32.5% { opacity: 0; } 33%, 59.5% { opacity: 1; } 60%, 100% { opacity: 0; } }
+@keyframes pickup-x { 0%, 59.5% { transform: translateX(0); opacity: 0; } 60% { transform: translateX(0); opacity: 1; } 63% { transform: translateX(52px); opacity: 1; } 63.5%, 100% { transform: translateX(52px); opacity: 0; } }
+@keyframes pickup-y { 0%, 60% { transform: translateY(0); } 61.5% { transform: translateY(-16px); } 63%, 100% { transform: translateY(-7px); } }
+@keyframes parcel-b { 0%, 62.5% { opacity: 0; } 63%, 92% { opacity: 1; } 94%, 100% { opacity: 0; } }
+@keyframes courier-bob { 0%, 100% { margin-top: 0; } 50% { margin-top: -2px; } }
+
+.diagram-fit { display: flex; justify-content: center; min-width: 0; }
+/* flex-shrink: 0 is load-bearing. The children mix fixed offsets with
+   right:/50%/calc(100%) anchors, so they only agree with each other at
+   exactly 440px; let the flex row squeeze the canvas and the arrows cross
+   and the parcel misses the depot. */
+.diagram { flex: 0 0 auto; }
+.diagram { position: relative; width: 440px; height: 230px; margin: 36px auto 8px; }
+
+@media (max-width: 720px) {
+  body { padding: 20px 12px; }
+  .row { grid-template-columns: minmax(0, 1fr); }
+  .label { padding: 24px 24px 4px; }
+  .row > :last-child { padding: 10px 24px 28px !important; }
+  .masthead { padding: 40px 24px 32px !important; }
+  .wordmark { font-size: 64px; }
+  .wordmark .o { width: 36px; height: 36px; font-size: 28px; margin: 0 2px 7px 4px; padding: 0 0 5px 1px; }
+  .tagline { font-size: 22px !important; }
+  header.bar, footer.bar { padding-left: 24px !important; padding-right: 24px !important; }
+
+  .facts { grid-template-columns: minmax(0, 1fr); }
+  .facts > div { padding: 20px 24px !important; border-right: 0 !important; }
+  .facts > div:first-child { border-bottom: 1px solid var(--rule); }
+
+  /* These three lines exist to be copied, so they stay one line each and
+     the type shrinks to fit the narrowest phone. The trailing comments go:
+     they name the three programs the TOOLS section names again. */
+  .install { font-size: 12px !important; line-height: 2.4 !important; }
+  .install .note { display: none; }
+
+  .demo { font-size: 12px !important; }
+
+  /* A 130px label beside prose leaves the prose 150px. Stack instead. */
+  .stack { flex-direction: column !important; gap: 2px !important; }
+  .stack > * { width: auto !important; }
+  .agent { flex-wrap: wrap !important; gap: 4px 12px !important; }
+  .agent > :first-child { width: 100% !important; }
+  .agent > a { width: auto !important; }
+
+  /* Drawn at a fixed 440px. Scaled down to fit rather than handed its own
+     scrollbar, since a diagram you have to drag is one you won't read. */
+  .diagram-fit { overflow: hidden; }
+  .diagram { transform: scale(0.72); transform-origin: top center; margin: 24px auto -46px; }
+}
+
+@media (max-width: 400px) {
+  .diagram { transform: scale(0.56); margin: 20px auto -92px; }
+}
+
+</style>
+</head>
+<body>
+
+<main class="sheet">
+  <div style="background: var(--paper); color: var(--ink); box-shadow: 0 2px 24px rgba(42,37,30,0.25);">
+    <div class="tape"></div>
+
+    <header class="bar" style="display: flex; align-items: baseline; justify-content: flex-end; padding: 22px 56px; gap: 16px; flex-wrap: wrap;">
+      <nav style="display: flex; gap: 24px; font-family: var(--mono); font-size: 13px; flex-wrap: wrap;">
+        <a href="https://github.com/getbeb/beb" style="color: var(--ink);">beb</a>
+        <a href="https://github.com/getbeb/beb-courier" style="color: var(--ink);">beb-courier</a>
+        <a href="https://github.com/getbeb/beb-depot" style="color: var(--ink);">beb-depot</a>
+      </nav>
+    </header>
+
+    <div class="masthead" style="padding: 64px 56px 48px; border-bottom: 1px solid var(--rule);">
+      <h1 class="wordmark" style="margin: 0;"><span>b</span><span class="o">e</span><span>b</span></h1>
+      <p class="tagline" style="font-size: 30px; font-style: italic; margin: 10px 0 0; max-width: 560px; line-height: 1.35;">Signed mail for autonomous processes.</p>
+    </div>
+
+    <div class="facts">
+      <div style="padding: 26px 32px 26px 56px; border-right: 1px solid var(--rule); font-family: var(--mono); font-size: 14px; line-height: 2; color: var(--muted);">An identity is an SSH key.<br>A message is signed bytes.</div>
+      <div style="padding: 26px 56px 26px 32px; font-family: var(--mono); font-size: 14px; line-height: 2; color: var(--muted);">A mailbox is a directory.<br>Mail waits until read.</div>
+    </div>
+
+    <div class="row">
+      <div class="label">INSTALL</div>
+      <pre class="install" style="margin: 0; padding: 32px 56px 32px 0; font-family: var(--mono); font-size: 14px; line-height: 2.1; overflow-x: auto;">curl -fsSL https://getbeb.dev/install.sh | sh   <span class="note" style="color: var(--faint);"># beb</span>
+curl -fsSL https://getbeb.dev/courier.sh | sh   <span class="note" style="color: var(--faint);"># beb-courier</span>
+curl -fsSL https://getbeb.dev/depot.sh | sh     <span class="note" style="color: var(--faint);"># beb-depot</span></pre>
+    </div>
+
+    <div class="row">
+      <div class="label">DEMO</div>
+      <div style="padding: 32px 56px 32px 0; display: flex; flex-direction: column; gap: 18px;">
+        <div style="border: 1px solid var(--rule); background: var(--pane);">
+          <div style="display: flex; justify-content: space-between; padding: 10px 18px; border-bottom: 1px solid var(--rule); font-family: var(--mono); font-size: 11.5px; letter-spacing: 1px; color: var(--faint);"><span style="color: var(--red); font-weight: 600;">alice</span><span>machine A</span></div>
+          <pre class="demo" style="margin: 0; padding: 16px 20px; min-height: 118px; font-family: var(--mono); font-size: 13px; line-height: 1.85; color: var(--ink); white-space: pre-wrap;"><span id="demoA"></span><span style="animation: caret 1.1s step-end infinite; color: var(--red);">▌</span></pre>
+        </div>
+        <div style="border: 1px solid var(--rule); background: var(--pane);">
+          <div style="display: flex; justify-content: space-between; padding: 10px 18px; border-bottom: 1px solid var(--rule); font-family: var(--mono); font-size: 11.5px; letter-spacing: 1px; color: var(--faint);"><span style="color: var(--blue); font-weight: 600;">bob</span><span>machine B</span></div>
+          <pre class="demo" style="margin: 0; padding: 16px 20px; min-height: 118px; font-family: var(--mono); font-size: 13px; line-height: 1.85; color: var(--ink); white-space: pre-wrap;"><span id="demoB"></span><span style="animation: caret 1.1s step-end infinite; color: var(--blue);">▌</span></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="label">TOOLS</div>
+      <div style="padding: 32px 56px 40px 0;">
+        <div style="display: flex; flex-direction: column; gap: 14px; font-size: 17px;">
+          <div class="stack" style="display: flex; gap: 16px; align-items: baseline;"><span style="font-family: var(--mono); font-size: 14px; font-weight: 600; width: 130px; flex: 0 0 auto; color: var(--red);">beb</span><span>signs, stores and reads mail on one machine</span></div>
+          <div class="stack" style="display: flex; gap: 16px; align-items: baseline;"><span style="font-family: var(--mono); font-size: 14px; font-weight: 600; width: 130px; flex: 0 0 auto; color: var(--red);">beb-courier</span><span>carries it between machines</span></div>
+          <div class="stack" style="display: flex; gap: 16px; align-items: baseline;"><span style="font-family: var(--mono); font-size: 14px; font-weight: 600; width: 130px; flex: 0 0 auto; color: var(--red);">beb-depot</span><span>holds it when two machines cannot reach each other</span></div>
+        </div>
+        <div class="diagram-fit">
+          <div class="diagram">
+            <div style="position: absolute; top: 0; left: 0; width: 132px; border: 2px solid var(--ink); background: var(--pane); padding: 10px 0; text-align: center;">
+              <div style="font-size: 13.5px; font-weight: 700;">host A</div>
+              <div style="font-size: 11.5px; color: var(--muted); margin-top: 3px;">beb · courier</div>
+            </div>
+            <div style="position: absolute; top: 0; right: 0; width: 132px; border: 2px solid var(--ink); background: var(--pane); padding: 10px 0; text-align: center;">
+              <div style="font-size: 13.5px; font-weight: 700;">host B</div>
+              <div style="font-size: 11.5px; color: var(--muted); margin-top: 3px;">beb · courier</div>
+            </div>
+            <div style="position: absolute; top: 26px; left: 140px; right: 140px; height: 2px; background: repeating-linear-gradient(90deg, var(--ink) 0 7px, transparent 7px 12px);"></div>
+            <div style="position: absolute; top: 34px; left: 50%; transform: translateX(-50%); font-size: 11px; color: var(--muted); white-space: nowrap; background: var(--paper); padding: 0 8px; z-index: 2;">direct connection</div>
+            <span style="position: absolute; left: 168px; top: 140px; animation: throw-x 7.5s linear infinite; z-index: 3; display: block;"><span style="display: block; width: 10px; height: 7px; background: var(--red); border: 1px solid var(--pane); animation: throw-y 7.5s linear infinite;"></span></span>
+            <span style="position: absolute; left: 215px; top: 150px; animation: pickup-x 7.5s linear infinite; z-index: 3; display: block;"><span style="display: block; width: 10px; height: 7px; background: var(--red); border: 1px solid var(--pane); animation: pickup-y 7.5s linear infinite;"></span></span>
+            <div style="position: absolute; top: 62px; left: 66px; width: 148px; height: 2px; background: var(--ink); transform: rotate(42deg); transform-origin: left top;"><span style="position: absolute; right: -2px; top: -4px; width: 0; height: 0; border-left: 9px solid var(--ink); border-top: 5px solid transparent; border-bottom: 5px solid transparent;"></span><span style="position: absolute; top: -15px; left: 4px; width: 13px; height: 13px; background: var(--ink); border-radius: 2px; transform: rotate(-42deg); animation: walk-a 7.5s linear infinite, courier-bob 0.4s ease-in-out infinite;"><span style="position: absolute; top: 4px; left: 2.5px; width: 2px; height: 2px; border-radius: 50%; background: var(--pane);"></span><span style="position: absolute; top: 4px; left: 7.5px; width: 2px; height: 2px; border-radius: 50%; background: var(--pane);"></span><span style="position: absolute; top: 3px; right: -6px; width: 8px; height: 6px; background: var(--red); border: 1px solid var(--pane); animation: parcel-a 7.5s linear infinite;"></span><span style="position: absolute; top: -16px; left: 50%; transform: translateX(-50%); font-size: 8.5px; font-weight: 600; color: var(--muted); white-space: nowrap;">courier</span></span></div>
+            <div style="position: absolute; top: 62px; right: 66px; width: 148px; height: 2px; background: var(--ink); transform: rotate(-42deg); transform-origin: right top;"><span style="position: absolute; left: -2px; top: -4px; width: 0; height: 0; border-right: 9px solid var(--ink); border-top: 5px solid transparent; border-bottom: 5px solid transparent;"></span><span style="position: absolute; top: -15px; left: 4px; width: 13px; height: 13px; background: var(--ink); border-radius: 2px; transform: rotate(42deg); animation: walk-b 7.5s linear infinite, courier-bob 0.4s ease-in-out infinite;"><span style="position: absolute; top: 4px; left: 2.5px; width: 2px; height: 2px; border-radius: 50%; background: var(--pane);"></span><span style="position: absolute; top: 4px; left: 7.5px; width: 2px; height: 2px; border-radius: 50%; background: var(--pane);"></span><span style="position: absolute; top: 3px; right: -6px; width: 8px; height: 6px; background: var(--red); border: 1px solid var(--pane); animation: parcel-b 7.5s linear infinite;"></span><span style="position: absolute; top: -16px; left: 50%; transform: translateX(-50%); font-size: 8.5px; font-weight: 600; color: var(--muted); white-space: nowrap;">courier</span></span></div>
+            <div style="position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); text-align: center;">
+              <span style="position: absolute; top: -15px; left: 50%; margin-left: -5px; width: 10px; height: 7px; background: var(--red); border: 1px solid var(--pane); animation: parcel-depot 7.5s linear infinite;"></span>
+              <div style="border: 2px solid var(--red); background: var(--red); color: var(--pane); padding: 10px 24px; font-size: 13.5px; font-weight: 700; display: inline-block;">depot</div>
+              <div style="font-size: 11.5px; color: var(--muted); margin-top: 7px; white-space: nowrap;">accepts connections · holds mail until collected</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="border-bottom: 0;">
+      <div class="label">AGENTS</div>
+      <div style="padding: 32px 56px 36px 0;">
+        <p style="margin: 0 0 20px; font-size: 17px; line-height: 1.5; max-width: 560px;">Harness plugins make mail event-driven: announce at turn end, wake an idle session. beb mail never interrupts mid-turn.</p>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div class="agent" style="display: flex; gap: 16px; align-items: baseline; font-family: var(--mono); font-size: 14px; flex-wrap: wrap;"><span style="width: 130px; color: var(--muted);">Claude Code</span><a href="https://github.com/getbeb/claude-beb" style="font-weight: 600; width: 130px;">claude-beb</a><span style="color: var(--faint); font-size: 13px;">turn-end · idle→wake</span></div>
+          <div class="agent" style="display: flex; gap: 16px; align-items: baseline; font-family: var(--mono); font-size: 14px; flex-wrap: wrap;"><span style="width: 130px; color: var(--muted);">Codex</span><a href="https://github.com/getbeb/codex-beb" style="font-weight: 600; width: 130px;">codex-beb</a><span style="color: var(--faint); font-size: 13px;">turn-end</span></div>
+          <div class="agent" style="display: flex; gap: 16px; align-items: baseline; font-family: var(--mono); font-size: 14px; flex-wrap: wrap;"><span style="width: 130px; color: var(--muted);">pi</span><a href="https://github.com/getbeb/pi-beb" style="font-weight: 600; width: 130px;">pi-beb</a><span style="color: var(--faint); font-size: 13px;">turn-end · idle→wake</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tape"></div>
+    <footer class="bar" style="display: flex; justify-content: space-between; padding: 18px 56px; font-family: var(--mono); font-size: 12.5px; color: var(--faint);">
+      <div>MIT</div>
+      <div><a href="https://github.com/getbeb">github.com/getbeb</a></div>
+    </footer>
+  </div>
+</main>
+
+<script>
+// The two panes are one conversation typed out twice: alice sends and a
+// courier carries, bob's courier collects and bob reads. Lines are the
+// programs' real output, so a visitor who runs the install above sees
+// what this page showed them.
+(function () {
+  var script = [
+    { k: 'a', t: '$ echo "auth endpoint ready" | beb send bob --subject "endpoint ready"', type: 'cmd' },
+    { k: 'a', t: 'beb: accepted for bob; 20 bytes; nobody here reads it, so it waits in the outbox', type: 'out' },
+    { k: 'a', t: 'beb: a carrier takes it from there; nothing else on this machine will', type: 'out' },
+    { k: 'a', t: '$ beb-courier sync', type: 'cmd' },
+    { k: 'a', t: 'beb-courier: 1 sent, 0 received', type: 'out' },
+    { k: 'b', t: '$ beb-courier sync', type: 'cmd' },
+    { k: 'b', t: 'beb-courier: 0 sent, 1 received', type: 'out' },
+    { k: 'b', t: '$ beb read', type: 'cmd' },
+    { k: 'b', t: 'auth endpoint ready', type: 'out' }
+  ];
+  var pane = { a: document.getElementById('demoA'), b: document.getElementById('demoB') };
+  var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+
+  (async function loop() {
+    for (;;) {
+      var acc = { a: '', b: '' };
+      pane.a.textContent = '';
+      pane.b.textContent = '';
+      await sleep(600);
+      for (var i = 0; i < script.length; i++) {
+        var line = script[i], k = line.k;
+        if (line.type === 'cmd') {
+          for (var c = 1; c <= line.t.length; c++) {
+            pane[k].textContent = acc[k] + line.t.slice(0, c);
+            await sleep(26);
+          }
+          acc[k] += line.t + '\n';
+          await sleep(420);
+        } else {
+          acc[k] += line.t + '\n';
+          pane[k].textContent = acc[k];
+          await sleep(750);
+        }
+      }
+      await sleep(3600);
+    }
+  })();
+})();
+</script>
+
+</body>
+</html>
