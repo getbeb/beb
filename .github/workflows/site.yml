@@ -46,7 +46,14 @@ jobs:
           ref: gh-pages
           path: pages
       - run: |
-          cp -r main/site/. pages/
+          # Mirror, not copy. `cp` can only ever add, so a file deleted from
+          # site/ stayed on the published site forever -- which is how
+          # beb-ssh.sh outlived the page that stopped shipping it. The three
+          # installers are written below and are not site/'s to delete.
+          rsync -a --delete \
+            --exclude .git --exclude install.sh \
+            --exclude courier.sh --exclude depot.sh \
+            main/site/ pages/
           cp main/install.sh pages/install.sh
           # Not "[ -f x ] && cp": a false test would end the step, since
           # Actions runs this under bash -e.
